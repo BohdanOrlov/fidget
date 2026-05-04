@@ -14,6 +14,7 @@ $ cargo run -pfidget-cli --release render2d -i models/prospero.vm -s 512 --eval=
 ## Script viewer ([`viewer`](viewer/))
 Minimal desktop GUI for interactive exploration,
 using [`egui`](https://github.com/emilk/egui)
+Supports both `.rhai` and `.vm` input files.
 
 ```shell
 cargo run --release -pfidget-viewer

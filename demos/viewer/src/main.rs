@@ -22,11 +22,11 @@ mod draw3d;
 mod script;
 mod watcher;
 
-/// Minimal viewer, using Fidget to render a Rhai script
+/// Minimal viewer, using Fidget to render a `.rhai` or `.vm` script
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct Args {
-    /// File to watch
+    /// File to watch (`.rhai` or `.vm`)
     target: String,
 }
 
@@ -246,6 +246,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (wake_tx, wake_rx) = unbounded();
 
     let path = Path::new(&args.target).to_owned();
+    let script_type = script::ScriptType::from_path(&path)?;
     std::thread::spawn(move || {
         let _ = watcher::file_watcher_thread(
             &path,
@@ -255,8 +256,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         info!("file watcher thread is done");
     });
     std::thread::spawn(move || {
-        let _ = script::rhai_script_thread(rhai_script_rx, rhai_result_tx);
-        info!("rhai script thread is done");
+        let _ =
+            script::script_thread(script_type, rhai_script_rx, rhai_result_tx);
+        info!("script thread is done");
     });
     std::thread::spawn(move || {
         #[cfg(feature = "jit")]

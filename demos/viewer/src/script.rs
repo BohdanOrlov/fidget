@@ -1,11 +1,39 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use crossbeam_channel::{Receiver, Sender};
 use fidget::{context::Tree, rhai::FromDynamic};
 use log::debug;
-use std::sync::{Arc, Mutex};
+use std::{
+    io::Cursor,
+    path::Path,
+    sync::{Arc, Mutex},
+};
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ScriptType {
+    Rhai,
+    Vm,
+}
+
+impl ScriptType {
+    pub(crate) fn from_path(path: &Path) -> Result<Self> {
+        let ext = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_ascii_lowercase());
+        match ext.as_deref() {
+            Some("rhai") => Ok(Self::Rhai),
+            Some("vm") => Ok(Self::Vm),
+            Some(ext) => bail!(
+                "unsupported file extension '{ext}'; expected '.rhai' or '.vm'"
+            ),
+            None => bail!("cannot detect script type without extension"),
+        }
+    }
+}
 
 /// Receives scripts and executes them with Fidget
-pub(crate) fn rhai_script_thread(
+pub(crate) fn script_thread(
+    script_type: ScriptType,
     rx: Receiver<String>,
     tx: Sender<Result<ScriptContext, String>>,
 ) -> Result<()> {
@@ -13,11 +41,26 @@ pub(crate) fn rhai_script_thread(
 
     loop {
         let script = rx.recv()?;
-        debug!("rhai script thread received script");
-        let r = engine.run(&script).map_err(|e| e.to_string());
-        debug!("rhai script thread is sending result to render thread");
+        debug!("script thread received update");
+        let r = match script_type {
+            ScriptType::Rhai => engine.run(&script).map_err(|e| e.to_string()),
+            ScriptType::Vm => run_vm(&script).map_err(|e| e.to_string()),
+        };
+        debug!("script thread is sending result to render thread");
         tx.send(r)?;
     }
+}
+
+fn run_vm(vm_text: &str) -> Result<ScriptContext> {
+    let mut cursor = Cursor::new(vm_text.as_bytes());
+    let (ctx, root) = fidget::context::Context::from_text(&mut cursor)?;
+    let tree = ctx.export(root)?;
+    Ok(ScriptContext {
+        shapes: vec![DrawShape {
+            tree,
+            color_rgb: [u8::MAX; 3],
+        }],
+    })
 }
 
 /// Engine for evaluating a Rhai script with Fidget-specific bindings

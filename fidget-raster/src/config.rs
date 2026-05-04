@@ -1,4 +1,7 @@
-use crate::{DistancePixel, GeometryBuffer, Image, RenderConfig, TileSizesRef};
+use crate::{
+    DistancePixel, GeometryBuffer, Image, LeafDebugBuffer, RenderConfig,
+    TileSizesRef,
+};
 use fidget_core::{
     eval::Function,
     render::{CancelToken, ImageSize, ThreadPool, TileSizes, VoxelSize},
@@ -170,6 +173,27 @@ impl VoxelRenderConfig<'_> {
         vars: &ShapeVars<f32>,
     ) -> Option<GeometryBuffer> {
         crate::render3d::<F>(shape, vars, self)
+    }
+
+    /// Render leaf-center debug samples in 3D using this configuration.
+    ///
+    /// This follows the same interval pruning and tape simplification
+    /// traversal as [`Self::run`], but samples once per terminal 3D leaf tile.
+    pub fn run_leaf_debug<F: Function>(
+        &self,
+        shape: Shape<F>,
+    ) -> Option<LeafDebugBuffer> {
+        self.run_leaf_debug_with_vars::<F>(shape, &ShapeVars::new())
+    }
+
+    /// Render leaf-center debug samples in 3D using this configuration and
+    /// variables.
+    pub fn run_leaf_debug_with_vars<F: Function>(
+        &self,
+        shape: Shape<F>,
+        vars: &ShapeVars<f32>,
+    ) -> Option<LeafDebugBuffer> {
+        crate::render3d_leaf_debug::<F>(shape, vars, self)
     }
 
     /// Returns the combined screen-to-model transform matrix

@@ -22,7 +22,7 @@ pub use config::{ImageRenderConfig, VoxelRenderConfig};
 pub use render2d::DistancePixel;
 
 use render2d::render as render2d;
-use render3d::render as render3d;
+use render3d::{render as render3d, render_leaf_debug as render3d_leaf_debug};
 
 /// Helper struct to borrow from [`TileSizes`]
 ///
@@ -467,6 +467,25 @@ impl GeometryPixel {
 
 /// Image containing depth and normal at each pixel
 pub type GeometryBuffer = Image<GeometryPixel, VoxelSize>;
+
+/// Pixel type for a [`LeafDebugBuffer`]
+#[repr(C)]
+#[derive(
+    Debug, Default, Copy, Clone, IntoBytes, FromBytes, Immutable, PartialEq,
+)]
+pub struct LeafDebugPixel {
+    /// Representative Z position of the sampled leaf center, in voxel units.
+    ///
+    /// Empty pixels have a depth of 0.
+    pub depth: f32,
+    /// Signed distance value at the sampled leaf center.
+    pub distance: f32,
+    /// Function gradients at the sampled leaf center.
+    pub normal: [f32; 3],
+}
+
+/// Image containing distance and normal samples at rendered leaf centers.
+pub type LeafDebugBuffer = Image<LeafDebugPixel, VoxelSize>;
 
 impl<P: Default + Copy + Clone> Image<P, VoxelSize> {
     /// Returns the image depth in voxels
