@@ -5,7 +5,9 @@ use crate::types::Interval;
 use super::{
     ShellParamsView, ShellProfileTopology, ShellSegmentTopology, ShellTopology,
     topology::{
-        ShellCubicCoefficients, ShellOpKind, ShellSegmentInterpolation,
+        SHELL_MAX_NODES_PER_CURVE, ShellCubicCoefficients, ShellOpKind,
+        ShellProfileSegmentTopology, ShellProfileSpanInterpolation,
+        ShellSegmentInterpolation,
     },
 };
 
@@ -88,6 +90,17 @@ fn outside_profile_segment_gap(
             + padding;
         let min_z = keel_min.min(sheer_min) - padding;
         let max_z = keel_max.max(sheer_max) + padding;
+        let half_width =
+            if segment.ship_fast_path && axis_gap(z, min_z, max_z) == 0.0 {
+                half_width.min(
+                    profile_segment_half_width_for_z_interval(
+                        profile, segment, x, z, half_width, padding,
+                    )
+                    .unwrap_or(half_width),
+                )
+            } else {
+                half_width
+            };
 
         let dx = axis_gap(x, min_x, max_x);
         let dy = axis_gap(y, -half_width, half_width);
@@ -100,6 +113,90 @@ fn outside_profile_segment_gap(
     }
 
     best_gap.is_finite().then_some(best_gap)
+}
+
+#[derive(Clone, Copy)]
+struct ProfileNodeRange {
+    max_half_width: f32,
+    min_z: f32,
+    max_z: f32,
+}
+
+fn profile_segment_half_width_for_z_interval(
+    profile: &ShellProfileTopology,
+    segment: ShellProfileSegmentTopology,
+    x: Interval,
+    z: Interval,
+    fallback_half_width: f32,
+    padding: f32,
+) -> Option<f32> {
+    let left = profile.sections[segment.left_section];
+    let right = profile.sections[segment.right_section];
+    let (t0, t1) = segment_t_interval(left.station, right.station, x);
+    let node_count = segment.node_count.max(2).min(SHELL_MAX_NODES_PER_CURVE);
+    let mut nodes = [ProfileNodeRange {
+        max_half_width: 0.0,
+        min_z: 0.0,
+        max_z: 0.0,
+    }; SHELL_MAX_NODES_PER_CURVE];
+
+    for (node_index, node) in nodes.iter_mut().enumerate().take(node_count) {
+        let left_node = left.nodes[node_index.min(left.node_count - 1)];
+        let right_node = right.nodes[node_index.min(right.node_count - 1)];
+        let ((width_min, width_max), (z_min, z_max)) =
+            match segment.interpolation {
+                ShellProfileSpanInterpolation::Linear => {
+                    let left_width = left_node.half_width.abs();
+                    let right_width = right_node.half_width.abs();
+                    let width_a = lerp(left_width, right_width, t0);
+                    let width_b = lerp(left_width, right_width, t1);
+                    let z_a = lerp(left_node.z, right_node.z, t0);
+                    let z_b = lerp(left_node.z, right_node.z, t1);
+                    (
+                        (width_a.min(width_b), width_a.max(width_b)),
+                        (z_a.min(z_b), z_a.max(z_b)),
+                    )
+                }
+                ShellProfileSpanInterpolation::SmoothCatmullRom => {
+                    let segment_node = segment.nodes[node_index];
+                    (
+                        coeff_range(segment_node.half_width, t0, t1),
+                        coeff_range(segment_node.z, t0, t1),
+                    )
+                }
+            };
+        *node = ProfileNodeRange {
+            max_half_width: width_min.abs().max(width_max.abs()),
+            min_z: z_min,
+            max_z: z_max,
+        };
+    }
+
+    let active_nodes = &nodes[..node_count];
+    let mut max_half_width = 0.0_f32;
+    let mut found_overlap = false;
+    for edge_index in 0..active_nodes.len() - 1 {
+        let a = active_nodes[edge_index];
+        let c = active_nodes[edge_index + 1];
+        let min_z = a.min_z.min(c.min_z) - padding;
+        let max_z = a.max_z.max(c.max_z) + padding;
+        if axis_gap(z, min_z, max_z) > 0.0 {
+            continue;
+        }
+
+        found_overlap = true;
+        let local_start = edge_index.saturating_sub(1);
+        let local_end = (edge_index + 2).min(active_nodes.len() - 1);
+        for node in &active_nodes[local_start..=local_end] {
+            max_half_width = max_half_width.max(node.max_half_width);
+        }
+    }
+
+    if !found_overlap {
+        return None;
+    }
+
+    Some((max_half_width * 1.02 + padding).min(fallback_half_width))
 }
 
 fn eval_shell_hull_positive_interval(
@@ -343,4 +440,36 @@ fn axis_gap(axis: Interval, min: f32, max: f32) -> f32 {
 
 fn axis_max_gap(axis: Interval, min: f32, max: f32) -> f32 {
     (axis.lower() - max).abs().max((axis.upper() - min).abs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shell::{
+        OpenTopPolicy, ShellProfileSectionTopology, ShellTopology,
+    };
+
+    #[test]
+    fn profile_shell_interval_prunes_width_outside_low_keel_profile() {
+        let topology = ShellTopology::ship_profile_shell_hull(
+            [
+                ShellProfileSectionTopology::ship(0.0, -0.5, 0.2, 0.5),
+                ShellProfileSectionTopology::ship(2.0, -0.5, 0.2, 0.5),
+            ],
+            0.10,
+            OpenTopPolicy::Closed,
+        );
+
+        let interval = eval_shell_interval(
+            &topology,
+            Interval::new(0.9, 1.1),
+            Interval::new(0.40, 0.45),
+            Interval::new(-0.50, -0.45),
+        );
+
+        assert!(
+            interval.lower() > 0.0,
+            "low keel tile is inside the coarse beam AABB but outside the actual narrow station profile; got {interval:?}",
+        );
+    }
 }

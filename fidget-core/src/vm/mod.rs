@@ -310,33 +310,6 @@ fn eval_shell_sample(
     .distance
 }
 
-fn eval_shell_grad(
-    shell: &ShellTopology,
-    scratch: &mut ShellEvalScratch,
-    x: Grad,
-    y: Grad,
-    z: Grad,
-) -> Grad {
-    let eps = 1.0e-3;
-    let value = eval_shell_sample(shell, scratch, x.v, y.v, z.v);
-    let dx = (eval_shell_sample(shell, scratch, x.v + eps, y.v, z.v)
-        - eval_shell_sample(shell, scratch, x.v - eps, y.v, z.v))
-        / (2.0 * eps);
-    let dy = (eval_shell_sample(shell, scratch, x.v, y.v + eps, z.v)
-        - eval_shell_sample(shell, scratch, x.v, y.v - eps, z.v))
-        / (2.0 * eps);
-    let dz = (eval_shell_sample(shell, scratch, x.v, y.v, z.v + eps)
-        - eval_shell_sample(shell, scratch, x.v, y.v, z.v - eps))
-        / (2.0 * eps);
-
-    Grad::new(
-        value,
-        dx.mul_add(x.dx, dy.mul_add(y.dx, dz * z.dx)),
-        dx.mul_add(x.dy, dy.mul_add(y.dy, dz * z.dy)),
-        dx.mul_add(x.dz, dy.mul_add(y.dz, dz * z.dz)),
-    )
-}
-
 /// Generic VM evaluator for tracing evaluation
 struct TracingVmEval<T> {
     slots: Vec<T>,
@@ -1401,8 +1374,9 @@ impl<const N: usize> BulkEvaluator for VmGradSliceEval<N> {
                         .shell_topology(shell)
                         .expect("shell sidecar should exist during grad eval");
                     for i in 0..size {
-                        v[out][i] = eval_shell_grad(
+                        v[out][i] = crate::shell::eval_shell_grad(
                             shell,
+                            crate::shell::ShellParamsView::empty(),
                             &mut self.0.shell_scratch,
                             v[x][i],
                             v[y][i],

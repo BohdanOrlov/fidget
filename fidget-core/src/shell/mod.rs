@@ -13,7 +13,8 @@ pub mod topology;
 pub use bounds::ShellBounds;
 pub use eval::{
     ShellEvalScratch, ShellEvalStats, ShellSample, eval_shell_distance,
-    reset_shell_eval_stats, set_shell_eval_stats_enabled, shell_eval_stats,
+    eval_shell_grad, reset_shell_eval_stats, set_shell_eval_stats_enabled,
+    shell_eval_stats,
 };
 pub use interval::eval_shell_interval;
 pub use params::{ShellParamLayout, ShellParamsView};

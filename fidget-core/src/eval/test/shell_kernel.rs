@@ -1,10 +1,19 @@
+use std::sync::MutexGuard;
+
 use crate::shell::{
     OpenTopPolicy, SHELL_MAX_CANDIDATES, ShellEvalScratch, ShellParamsView,
     ShellProfileNodeContinuity, ShellProfileNodeTopology,
     ShellProfileSectionTopology, ShellProfileSpanInterpolation,
-    ShellSectionTopology, ShellTopology, eval_shell_distance,
-    reset_shell_eval_stats, set_shell_eval_stats_enabled, shell_eval_stats,
+    ShellSectionTopology, ShellTopology, eval::SHELL_EVAL_STATS_TEST_LOCK,
+    eval_shell_distance, reset_shell_eval_stats, set_shell_eval_stats_enabled,
+    shell_eval_stats,
 };
+
+fn shell_eval_stats_test_guard() -> MutexGuard<'static, ()> {
+    SHELL_EVAL_STATS_TEST_LOCK
+        .lock()
+        .expect("stats lock should not be poisoned")
+}
 
 fn equal_circle_loft() -> ShellTopology {
     ShellTopology::line_loft_circles(
@@ -17,6 +26,11 @@ fn equal_circle_loft() -> ShellTopology {
 }
 
 fn sample(topology: &ShellTopology, x: f32, y: f32, z: f32) -> f32 {
+    let _stats_guard = shell_eval_stats_test_guard();
+    sample_unlocked(topology, x, y, z)
+}
+
+fn sample_unlocked(topology: &ShellTopology, x: f32, y: f32, z: f32) -> f32 {
     let mut scratch = ShellEvalScratch::default();
     eval_shell_distance(
         topology,
@@ -192,26 +206,30 @@ fn smooth_profile_nodes_fair_the_section_beyond_linear_edges() {
 }
 
 #[test]
-fn station_profile_distance_evaluates_whole_section_edges() {
+fn station_profile_distance_prunes_whole_section_edges_by_bounds() {
     const SAMPLE_COUNT: usize = 100;
     let topology =
         profile_normal_rib_test_topology(ShellProfileNodeContinuity::Smooth);
-    let _stats_guard = super::SHELL_EVAL_STATS_TEST_LOCK.lock().unwrap();
+    let _stats_guard = shell_eval_stats_test_guard();
 
     set_shell_eval_stats_enabled(true);
     reset_shell_eval_stats();
     let mut distance = 0.0;
     for _ in 0..SAMPLE_COUNT {
-        distance = sample(&topology, 1.0, 0.50, 0.05);
+        distance = sample_unlocked(&topology, 1.0, 0.50, 0.05);
     }
     let stats = shell_eval_stats();
     set_shell_eval_stats_enabled(false);
 
     assert!(distance.is_finite());
     assert!(
-        stats.profile2d_segment_tests >= (SAMPLE_COUNT as u64) * 4,
-        "four-node station profiles should test all three spans plus deck edge per sample, got {} segment tests",
+        stats.profile2d_segment_tests <= (SAMPLE_COUNT as u64) * 2,
+        "four-node station profiles should prune spans whose bounds cannot beat the current closest edge, got {} segment tests",
         stats.profile2d_segment_tests
+    );
+    assert!(
+        stats.profile2d_bezier_tests > 0,
+        "smooth station profiles should still use the exact Hermite edge solver for relevant spans"
     );
 }
 

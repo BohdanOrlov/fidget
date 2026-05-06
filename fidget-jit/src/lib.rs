@@ -34,7 +34,7 @@ use fidget_core::{
     render::{RenderHints, TileSizes},
     shell::{
         ShellEvalScratch, ShellParamsView, ShellTopology, eval_shell_distance,
-        eval_shell_interval,
+        eval_shell_grad, eval_shell_interval,
     },
     types::{Grad, Interval},
     var::VarMap,
@@ -183,33 +183,9 @@ pub(crate) extern "C" fn jit_shell_grad_ptr(
     let x = unsafe { *x };
     let y = unsafe { *y };
     let z = unsafe { *z };
-    let eps = 1.0e-3;
     let mut scratch = ShellEvalScratch::default();
-    let mut sample = |x: f32, y: f32, z: f32| {
-        eval_shell_distance(
-            shell,
-            ShellParamsView::empty(),
-            &mut scratch,
-            x,
-            y,
-            z,
-        )
-        .distance
-    };
-    let value = sample(x.v, y.v, z.v);
-    let dx = (sample(x.v + eps, y.v, z.v) - sample(x.v - eps, y.v, z.v))
-        / (2.0 * eps);
-    let dy = (sample(x.v, y.v + eps, z.v) - sample(x.v, y.v - eps, z.v))
-        / (2.0 * eps);
-    let dz = (sample(x.v, y.v, z.v + eps) - sample(x.v, y.v, z.v - eps))
-        / (2.0 * eps);
-
-    let grad = Grad::new(
-        value,
-        dx.mul_add(x.dx, dy.mul_add(y.dx, dz * z.dx)),
-        dx.mul_add(x.dy, dy.mul_add(y.dy, dz * z.dy)),
-        dx.mul_add(x.dz, dy.mul_add(y.dz, dz * z.dz)),
-    );
+    let grad =
+        eval_shell_grad(shell, ShellParamsView::empty(), &mut scratch, x, y, z);
     unsafe { *out = grad };
 }
 

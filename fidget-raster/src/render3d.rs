@@ -30,6 +30,9 @@ struct Scratch {
 
     /// Depth of each column
     columns: Vec<usize>,
+
+    /// Output pixel offsets that need gradient shading
+    grad_pixels: Vec<usize>,
 }
 
 impl Scratch {
@@ -47,6 +50,7 @@ impl Scratch {
             zg: vec![Grad::from(0.0); size2],
 
             columns: vec![0; size2],
+            grad_pixels: Vec::with_capacity(size2),
         }
     }
 }
@@ -389,11 +393,11 @@ impl<F: Function> Worker<'_, F> {
         tile: Tile<3>,
     ) {
         // Prepare for pixel-by-pixel evaluation
-        let mut index = 0;
         assert!(self.scratch.x.len() >= tile_size.pow(3));
         assert!(self.scratch.y.len() >= tile_size.pow(3));
         assert!(self.scratch.z.len() >= tile_size.pow(3));
         self.scratch.columns.clear();
+        self.scratch.grad_pixels.clear();
         for xy in 0..tile_size.pow(2) {
             let i = xy % tile_size;
             let j = xy / tile_size;
@@ -406,89 +410,101 @@ impl<F: Function> Worker<'_, F> {
                 continue;
             }
 
-            for k in (0..tile_size).rev() {
-                // SAFETY:
-                // Index cannot exceed tile_size**3, which is (a) the size
-                // that we allocated in `Scratch::new` and (b) checked by
-                // assertions above.
-                //
-                // Using unsafe indexing here is a roughly 2.5% speedup,
-                // since this is the hottest loop.
-                unsafe {
-                    *self.scratch.x.get_unchecked_mut(index) =
-                        (tile.corner[0] + i) as f32;
-                    *self.scratch.y.get_unchecked_mut(index) =
-                        (tile.corner[1] + j) as f32;
-                    *self.scratch.z.get_unchecked_mut(index) =
-                        (tile.corner[2] + k) as f32;
-                }
-                index += 1;
-            }
             self.scratch.columns.push(xy);
         }
-        let size = index;
-        assert!(size > 0);
 
-        let start = Instant::now();
-        let out = self
-            .eval_float_slice
-            .eval_v(
-                shape.f_tape(&mut self.tape_storage),
-                &self.scratch.x[..index],
-                &self.scratch.y[..index],
-                &self.scratch.z[..index],
-                vars,
-            )
-            .unwrap();
-        self.stats.float_eval_time += start.elapsed();
-        self.stats.float_eval_calls += 1;
-        self.stats.float_eval_samples += size as u64;
+        const LEAF_DEPTH_BATCH: usize = 1;
 
-        // We're iterating over a few things simultaneously
-        // - col refers to the xy position in the tile
-        // - grad refers to points that we must do gradient evaluation on
         let mut grad = 0;
-        let mut depth = out.chunks(tile_size);
-        for col in 0..self.scratch.columns.len() {
-            // Find the first set pixel in the column
-            let depth = depth.next().unwrap();
-            let k = match depth.iter().enumerate().find(|(_, d)| **d < 0.0) {
-                Some((i, _)) => i,
-                None => continue,
-            };
+        let mut upper_k = tile_size;
+        while upper_k > 0 {
+            let size = self.scratch.columns.len();
+            if size == 0 {
+                break;
+            }
+            let lower_k = upper_k.saturating_sub(LEAF_DEPTH_BATCH);
+            let depth_count = upper_k - lower_k;
 
-            // Get X and Y values from the `columns` array.  Note that we can't
-            // iterate over the array directly because we're also modifying it
-            // (below)
-            let xy = self.scratch.columns[col];
-            let i = xy % tile_size;
-            let j = xy / tile_size;
+            let mut sample_count = 0;
+            for column_index in 0..size {
+                let xy = self.scratch.columns[column_index];
+                let i = xy % tile_size;
+                let j = xy / tile_size;
 
-            // Flip Z value, since voxels are packed front-to-back
-            let k = tile_size - 1 - k;
+                for k in (lower_k..upper_k).rev() {
+                    // SAFETY:
+                    // Index cannot exceed tile_size**3, which is (a) the size
+                    // that we allocated in `Scratch::new` and (b) checked by
+                    // assertions above.
+                    //
+                    // Using unsafe indexing here is a roughly 2.5% speedup,
+                    // since this is the hottest loop.
+                    unsafe {
+                        *self.scratch.x.get_unchecked_mut(sample_count) =
+                            (tile.corner[0] + i) as f32;
+                        *self.scratch.y.get_unchecked_mut(sample_count) =
+                            (tile.corner[1] + j) as f32;
+                        *self.scratch.z.get_unchecked_mut(sample_count) =
+                            (tile.corner[2] + k) as f32;
+                    }
+                    sample_count += 1;
+                }
+            }
 
-            // Set the depth of the pixel
-            let o = self.tile_sizes.pixel_offset(tile.add(Vector2::new(i, j)));
-            let z = (tile.corner[2] + k + 1) as f32;
-            assert!(self.out[o].depth < z);
-            self.out[o].depth = z;
+            let start = Instant::now();
+            let out = self
+                .eval_float_slice
+                .eval_v(
+                    shape.f_tape(&mut self.tape_storage),
+                    &self.scratch.x[..sample_count],
+                    &self.scratch.y[..sample_count],
+                    &self.scratch.z[..sample_count],
+                    vars,
+                )
+                .unwrap();
+            self.stats.float_eval_time += start.elapsed();
+            self.stats.float_eval_calls += 1;
+            self.stats.float_eval_samples += sample_count as u64;
 
-            // Prepare to do gradient rendering of this point.
-            // We step one voxel above the surface to reduce
-            // glitchiness on edges and corners, where rendering
-            // inside the surface could pick the wrong normal.
-            self.scratch.xg[grad] =
-                Grad::new((tile.corner[0] + i) as f32, 1.0, 0.0, 0.0);
-            self.scratch.yg[grad] =
-                Grad::new((tile.corner[1] + j) as f32, 0.0, 1.0, 0.0);
-            self.scratch.zg[grad] =
-                Grad::new((tile.corner[2] + k) as f32, 0.0, 0.0, 1.0);
+            let mut write = 0;
+            for column_index in 0..size {
+                let xy = self.scratch.columns[column_index];
+                let base = column_index * depth_count;
+                let hit = out[base..base + depth_count]
+                    .iter()
+                    .position(|distance| *distance < 0.0);
+                if let Some(offset) = hit {
+                    let i = xy % tile_size;
+                    let j = xy / tile_size;
+                    let k = upper_k - 1 - offset;
 
-            // This can only be called once per iteration, so we'll
-            // never overwrite parts of columns that are still used
-            // by the outer loop
-            self.scratch.columns[grad] = o;
-            grad += 1;
+                    // Set the depth of the pixel
+                    let o = self
+                        .tile_sizes
+                        .pixel_offset(tile.add(Vector2::new(i, j)));
+                    let z = (tile.corner[2] + k + 1) as f32;
+                    assert!(self.out[o].depth < z);
+                    self.out[o].depth = z;
+
+                    // Prepare to do gradient rendering of this point.
+                    // We step one voxel above the surface to reduce
+                    // glitchiness on edges and corners, where rendering
+                    // inside the surface could pick the wrong normal.
+                    self.scratch.xg[grad] =
+                        Grad::new((tile.corner[0] + i) as f32, 1.0, 0.0, 0.0);
+                    self.scratch.yg[grad] =
+                        Grad::new((tile.corner[1] + j) as f32, 0.0, 1.0, 0.0);
+                    self.scratch.zg[grad] =
+                        Grad::new((tile.corner[2] + k) as f32, 0.0, 0.0, 1.0);
+                    self.scratch.grad_pixels.push(o);
+                    grad += 1;
+                } else {
+                    self.scratch.columns[write] = xy;
+                    write += 1;
+                }
+            }
+            self.scratch.columns.truncate(write);
+            upper_k = lower_k;
         }
 
         if grad > 0 {
@@ -507,7 +523,9 @@ impl<F: Function> Worker<'_, F> {
             self.stats.grad_eval_calls += 1;
             self.stats.grad_eval_samples += grad as u64;
 
-            for (index, o) in self.scratch.columns[0..grad].iter().enumerate() {
+            for (index, o) in
+                self.scratch.grad_pixels[0..grad].iter().enumerate()
+            {
                 let g = out[index];
                 self.out[*o].normal = [g.dx, g.dy, g.dz];
             }
@@ -1006,7 +1024,11 @@ pub fn render_leaf_debug<F: Function>(
 #[cfg(test)]
 mod test {
     use super::*;
-    use fidget_core::{Context, render::VoxelSize, vm::VmShape};
+    use fidget_core::{
+        Context,
+        render::{TileSizes, VoxelSize},
+        vm::VmShape,
+    };
 
     /// Make sure we don't crash if there's only a single tile
     #[test]
@@ -1051,5 +1073,21 @@ mod test {
         cancel.cancel();
         let out = cfg.run::<_>(shape);
         assert!(out.is_none());
+    }
+
+    #[test]
+    fn render_stops_sampling_leaf_column_after_visible_surface() {
+        let mut ctx = Context::new();
+        let x = ctx.x();
+        let shape = VmShape::new(&ctx, x).unwrap();
+
+        let cfg = VoxelRenderConfig {
+            image_size: VoxelSize::new(8, 8, 8),
+            tile_sizes: TileSizes::new(&[8]).unwrap(),
+            ..Default::default()
+        };
+        let (_image, stats) = cfg.run_with_stats(shape).unwrap();
+
+        assert_eq!(stats.float_eval_samples, 288);
     }
 }
