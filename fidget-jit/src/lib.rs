@@ -1088,7 +1088,7 @@ impl Function for JitFunction {
 
 impl RenderHints for JitFunction {
     fn tile_sizes_3d() -> TileSizes {
-        TileSizes::new(&[12, 6, 3]).unwrap()
+        TileSizes::new(&[64, 16, 8]).unwrap()
     }
 
     fn tile_sizes_2d() -> TileSizes {
@@ -1502,6 +1502,16 @@ mod test {
     fidget_core::interval_tests!(JitFunction);
     fidget_core::float_slice_tests!(JitFunction);
     fidget_core::point_tests!(JitFunction);
+
+    #[test]
+    fn jit_3d_tile_hints_preserve_general_render_defaults() {
+        let sizes = JitFunction::tile_sizes_3d()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+
+        assert_eq!(sizes, [64, 16, 8]);
+    }
 
     fn shell() -> Arc<ShellTopology> {
         Arc::new(ShellTopology::line_loft_circles(

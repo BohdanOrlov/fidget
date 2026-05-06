@@ -248,7 +248,7 @@ impl<const N: usize> Function for GenericVmFunction<N> {
 
 impl<const N: usize> RenderHints for GenericVmFunction<N> {
     fn tile_sizes_3d() -> TileSizes {
-        TileSizes::new(&[8, 4, 2]).unwrap()
+        TileSizes::new(&[128, 64, 32, 16, 8]).unwrap()
     }
 
     fn tile_sizes_2d() -> TileSizes {
@@ -1629,4 +1629,14 @@ mod test {
     crate::interval_tests!(VmFunction);
     crate::float_slice_tests!(VmFunction);
     crate::point_tests!(VmFunction);
+
+    #[test]
+    fn vm_3d_tile_hints_preserve_general_render_defaults() {
+        let sizes = VmFunction::tile_sizes_3d()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+
+        assert_eq!(sizes, [128, 64, 32, 16, 8]);
+    }
 }
