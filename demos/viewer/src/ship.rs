@@ -22,17 +22,18 @@ const SHEER_CTRL: [f32; 11] = [
 const BEAM_CTRL: [f32; 11] = [
     0.000, 0.020, 0.085, 0.190, 0.275, 0.330, 0.345, 0.325, 0.245, 0.145, 0.055,
 ];
-// Native profile controls are oriented like the Hercules drawing: fuller
-// counter stern at x-min, fine rising bow stem at x-max, and a long flat run.
+// Native profile controls are oriented like the Hercules drawing: rounded
+// counter stern at x-min, fuller middle body, fine rising bow stem at x-max,
+// and a long flat run.
 const NATIVE_KEEL_CTRL: [f32; 11] = [
-    0.00, -0.13, -0.25, -0.33, -0.36, -0.365, -0.36, -0.325, -0.245, -0.075,
-    0.105,
+    0.015, -0.120, -0.245, -0.330, -0.365, -0.372, -0.368, -0.335, -0.255,
+    -0.075, 0.110,
 ];
 const NATIVE_SHEER_CTRL: [f32; 11] = [
-    0.255, 0.220, 0.190, 0.172, 0.162, 0.160, 0.164, 0.176, 0.205, 0.250, 0.315,
+    0.280, 0.238, 0.198, 0.174, 0.162, 0.158, 0.162, 0.180, 0.212, 0.262, 0.326,
 ];
 const NATIVE_BEAM_CTRL: [f32; 11] = [
-    0.095, 0.135, 0.200, 0.245, 0.265, 0.262, 0.242, 0.198, 0.130, 0.045, 0.000,
+    0.165, 0.205, 0.280, 0.330, 0.355, 0.360, 0.342, 0.292, 0.190, 0.066, 0.000,
 ];
 
 #[derive(Clone, Copy, Debug)]
