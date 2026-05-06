@@ -32,6 +32,10 @@ use fidget_core::{
         TracingEvalError, TracingEvaluator,
     },
     render::{RenderHints, TileSizes},
+    shell::{
+        ShellEvalScratch, ShellParamsView, ShellTopology, eval_shell_distance,
+        eval_shell_interval,
+    },
     types::{Grad, Interval},
     var::VarMap,
     vm::{BadTrace, Choice, GenericVmFunction, VmData, VmTrace, VmWorkspace},
@@ -103,6 +107,111 @@ fn reg(r: u8) -> u8 {
 const CHOICE_LEFT: u32 = Choice::Left as u32;
 const CHOICE_RIGHT: u32 = Choice::Right as u32;
 const CHOICE_BOTH: u32 = Choice::Both as u32;
+
+pub(crate) extern "C" fn jit_shell_point(
+    shell: *const ShellTopology,
+    x: f32,
+    y: f32,
+    z: f32,
+) -> f32 {
+    let shell = unsafe {
+        shell
+            .as_ref()
+            .expect("JIT shell helper received null topology pointer")
+    };
+    let mut scratch = ShellEvalScratch::default();
+    eval_shell_distance(shell, ShellParamsView::empty(), &mut scratch, x, y, z)
+        .distance
+}
+
+pub(crate) extern "C" fn jit_shell_float4(
+    shell: *const ShellTopology,
+    xs: *const f32,
+    ys: *const f32,
+    zs: *const f32,
+    out: *mut f32,
+) {
+    let shell = unsafe {
+        shell
+            .as_ref()
+            .expect("JIT shell helper received null topology pointer")
+    };
+    let mut scratch = ShellEvalScratch::default();
+    for i in 0..4 {
+        let x = unsafe { *xs.add(i) };
+        let y = unsafe { *ys.add(i) };
+        let z = unsafe { *zs.add(i) };
+        let distance = eval_shell_distance(
+            shell,
+            ShellParamsView::empty(),
+            &mut scratch,
+            x,
+            y,
+            z,
+        )
+        .distance;
+        unsafe { *out.add(i) = distance };
+    }
+}
+
+pub(crate) extern "C" fn jit_shell_interval(
+    shell: *const ShellTopology,
+    x: Interval,
+    y: Interval,
+    z: Interval,
+) -> Interval {
+    let shell = unsafe {
+        shell
+            .as_ref()
+            .expect("JIT shell helper received null topology pointer")
+    };
+    eval_shell_interval(shell, x, y, z)
+}
+
+pub(crate) extern "C" fn jit_shell_grad_ptr(
+    shell: *const ShellTopology,
+    x: *const Grad,
+    y: *const Grad,
+    z: *const Grad,
+    out: *mut Grad,
+) {
+    let shell = unsafe {
+        shell
+            .as_ref()
+            .expect("JIT shell helper received null topology pointer")
+    };
+    let x = unsafe { *x };
+    let y = unsafe { *y };
+    let z = unsafe { *z };
+    let eps = 1.0e-3;
+    let mut scratch = ShellEvalScratch::default();
+    let mut sample = |x: f32, y: f32, z: f32| {
+        eval_shell_distance(
+            shell,
+            ShellParamsView::empty(),
+            &mut scratch,
+            x,
+            y,
+            z,
+        )
+        .distance
+    };
+    let value = sample(x.v, y.v, z.v);
+    let dx = (sample(x.v + eps, y.v, z.v) - sample(x.v - eps, y.v, z.v))
+        / (2.0 * eps);
+    let dy = (sample(x.v, y.v + eps, z.v) - sample(x.v, y.v - eps, z.v))
+        / (2.0 * eps);
+    let dz = (sample(x.v, y.v, z.v + eps) - sample(x.v, y.v, z.v - eps))
+        / (2.0 * eps);
+
+    let grad = Grad::new(
+        value,
+        dx.mul_add(x.dx, dy.mul_add(y.dx, dz * z.dx)),
+        dx.mul_add(x.dy, dy.mul_add(y.dy, dz * z.dy)),
+        dx.mul_add(x.dz, dy.mul_add(y.dz, dz * z.dz)),
+    );
+    unsafe { *out = grad };
+}
 
 /// Trait for generating machine assembly
 trait Assembler {
@@ -232,6 +341,18 @@ trait Assembler {
 
     /// Modulo of two values (least non-negative remainder)
     fn build_mod(&mut self, out_reg: u8, lhs_reg: u8, rhs_reg: u8);
+
+    /// Native shell distance helper call.
+    fn build_shell_distance(
+        &mut self,
+        _out_reg: u8,
+        _shell: *const ShellTopology,
+        _x_reg: u8,
+        _y_reg: u8,
+        _z_reg: u8,
+    ) {
+        panic!("native shell unsupported by this JIT backend")
+    }
 
     // Special-case functions for immediates.  In some cases, you can be more
     // efficient if you know that an argument is an immediate (for example, both
@@ -840,6 +961,18 @@ fn build_asm_fn_with_storage<A: Assembler>(
                 let reg = asm.load_imm(imm);
                 asm.build_compare(out, reg, arg);
             }
+            RegOp::ShellDistance(out, shell, x, y, z) => {
+                let shell = t
+                    .shell_topology(shell)
+                    .expect("shell sidecar should exist during JIT lowering");
+                asm.build_shell_distance(
+                    out,
+                    shell.as_ref() as *const ShellTopology,
+                    x,
+                    y,
+                    z,
+                );
+            }
         }
     }
 
@@ -861,6 +994,7 @@ impl JitFunction {
         JitTracingFn {
             mmap: f.into(),
             vars: self.0.data().vars.clone(),
+            _shells: self.0.data().shell_topologies().to_vec(),
             choice_count: self.0.choice_count(),
             output_count: self.0.output_count(),
             fn_trace: unsafe {
@@ -878,6 +1012,7 @@ impl JitFunction {
             mmap: f.into(),
             output_count: self.0.output_count(),
             vars: self.0.data().vars.clone(),
+            _shells: self.0.data().shell_topologies().to_vec(),
             fn_bulk: unsafe {
                 std::mem::transmute::<
                     *const std::ffi::c_void,
@@ -1046,6 +1181,7 @@ pub struct JitTracingFn<T> {
     choice_count: usize,
     output_count: usize,
     vars: Arc<VarMap>,
+    _shells: Vec<Arc<ShellTopology>>,
     fn_trace: JitTracingFnPointer<T>,
 }
 
@@ -1158,6 +1294,7 @@ pub struct JitBulkFn<T> {
     mmap: Arc<Mmap>,
     vars: Arc<VarMap>,
     output_count: usize,
+    _shells: Vec<Arc<ShellTopology>>,
     fn_bulk: JitBulkFnPointer<T>,
 }
 
@@ -1353,10 +1490,114 @@ pub type JitShape = fidget_core::shape::Shape<JitFunction>;
 #[cfg(test)]
 mod test {
     use super::*;
+    use fidget_core::{
+        context::{Context, Tree},
+        shell::{ShellSectionTopology, ShellTopology},
+        types::{Grad, Interval},
+        var::Var,
+    };
+    use std::sync::Arc;
+
     fidget_core::grad_slice_tests!(JitFunction);
     fidget_core::interval_tests!(JitFunction);
     fidget_core::float_slice_tests!(JitFunction);
     fidget_core::point_tests!(JitFunction);
+
+    fn shell() -> Arc<ShellTopology> {
+        Arc::new(ShellTopology::line_loft_circles(
+            vec![
+                ShellSectionTopology::circle(0.0, 0.0, 0.0, 1.0),
+                ShellSectionTopology::circle(2.0, 0.0, 0.0, 1.0),
+            ]
+            .into_boxed_slice(),
+        ))
+    }
+
+    fn shell_shape() -> JitFunction {
+        let tree = Tree::line_loft_shell(shell());
+        let mut ctx = Context::new();
+        let root = ctx.import(&tree);
+        JitFunction::new(&ctx, &[root]).unwrap()
+    }
+
+    fn point_args(vars: &VarMap, x: f32, y: f32, z: f32) -> Vec<f32> {
+        let mut args = vec![0.0; vars.len()];
+        args[vars[&Var::X]] = x;
+        args[vars[&Var::Y]] = y;
+        args[vars[&Var::Z]] = z;
+        args
+    }
+
+    #[test]
+    fn shell_jit_point_matches_vm_kernel() {
+        let shape = shell_shape();
+        let tape = shape.point_tape(Default::default());
+        let mut eval = JitFunction::new_point_eval();
+        let args = point_args(tape.vars(), 1.0, 1.25, 0.0);
+        let (out, trace) = eval.eval(&tape, &args).unwrap();
+
+        assert_approx_eq(out[0], 0.25);
+        assert!(trace.is_none());
+    }
+
+    #[test]
+    fn shell_jit_interval_rejects_outside_bounds() {
+        let shape = shell_shape();
+        let tape = shape.interval_tape(Default::default());
+        let mut args = vec![Interval::new(0.0, 0.0); tape.vars().len()];
+        args[tape.vars()[&Var::X]] = Interval::new(4.0, 5.0);
+        args[tape.vars()[&Var::Y]] = Interval::new(-0.25, 0.25);
+        args[tape.vars()[&Var::Z]] = Interval::new(-0.25, 0.25);
+
+        let mut eval = JitFunction::new_interval_eval();
+        let (out, trace) = eval.eval(&tape, &args).unwrap();
+        assert!(out[0].lower() > 0.0);
+        assert_eq!(out[0].upper(), f32::INFINITY);
+        assert!(trace.is_none());
+    }
+
+    #[test]
+    fn shell_jit_float_slice_matches_point_samples() {
+        let shape = shell_shape();
+        let tape = shape.float_slice_tape(Default::default());
+        let samples = [
+            (1.0, 0.0, 0.0),
+            (1.0, 1.25, 0.0),
+            (3.0, 0.0, 0.0),
+            (1.0, 0.0, 1.25),
+        ];
+        let mut args = vec![vec![0.0; samples.len()]; tape.vars().len()];
+        for (i, &(x, y, z)) in samples.iter().enumerate() {
+            args[tape.vars()[&Var::X]][i] = x;
+            args[tape.vars()[&Var::Y]][i] = y;
+            args[tape.vars()[&Var::Z]][i] = z;
+        }
+
+        let mut eval = JitFunction::new_float_slice_eval();
+        let out = eval.eval(&tape, &args).unwrap();
+        assert_approx_eq(out[0][0], -1.0);
+        assert_approx_eq(out[0][1], 0.25);
+        assert_approx_eq(out[0][2], 1.0);
+        assert_approx_eq(out[0][3], 0.25);
+    }
+
+    #[test]
+    fn shell_jit_grad_slice_returns_native_distance_and_gradient() {
+        let shape = shell_shape();
+        let tape = shape.grad_slice_tape(Default::default());
+        let mut args = vec![vec![Grad::from(0.0); 1]; tape.vars().len()];
+        args[tape.vars()[&Var::X]][0] = Grad::new(1.0, 1.0, 0.0, 0.0);
+        args[tape.vars()[&Var::Y]][0] = Grad::new(1.25, 0.0, 1.0, 0.0);
+        args[tape.vars()[&Var::Z]][0] = Grad::new(0.0, 0.0, 0.0, 1.0);
+
+        let mut eval = JitFunction::new_grad_slice_eval();
+        let out = eval.eval(&tape, &args).unwrap()[0][0];
+
+        assert_approx_eq(out.v, 0.25);
+        assert!(out.dx.abs() <= 1.0e-3, "unexpected dx={}", out.dx);
+        assert!((out.dy - 1.0).abs() <= 1.0e-3, "unexpected dy={}", out.dy);
+        assert!(out.dz.abs() <= 1.0e-3, "unexpected dz={}", out.dz);
+    }
 
     #[test]
     fn test_mmap_expansion() {
@@ -1374,5 +1615,13 @@ mod test {
             let v = unsafe { *ptr.add(i as usize) };
             assert_eq!(v, i);
         }
+    }
+
+    fn assert_approx_eq(left: f32, right: f32) {
+        let diff = (left - right).abs();
+        assert!(
+            diff <= 1.0e-5,
+            "expected {left} to be within tolerance of {right}; diff={diff}"
+        );
     }
 }

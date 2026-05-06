@@ -279,6 +279,12 @@ impl<const N: usize> VmData<N> {
                     *lhs = workspace.get_or_insert_active(*lhs);
                     *rhs = workspace.get_or_insert_active(*rhs);
                 }
+                SsaOp::ShellDistance(index, _shell, x, y, z) => {
+                    *index = new_index;
+                    *x = workspace.get_or_insert_active(*x);
+                    *y = workspace.get_or_insert_active(*y);
+                    *z = workspace.get_or_insert_active(*z);
+                }
                 SsaOp::AddRegImm(index, arg, _imm)
                 | SsaOp::MulRegImm(index, arg, _imm)
                 | SsaOp::SubRegImm(index, arg, _imm)
@@ -307,8 +313,13 @@ impl<const N: usize> VmData<N> {
                 tape: ops_out,
                 choice_count,
                 output_count,
+                shells: self.ssa.shells.clone(),
             },
-            asm: asm_tape,
+            asm: {
+                let mut asm_tape = asm_tape;
+                asm_tape.shells = self.ssa.shells.clone();
+                asm_tape
+            },
             vars: self.vars.clone(),
         })
     }
@@ -316,6 +327,21 @@ impl<const N: usize> VmData<N> {
     /// Produces an iterator that visits [`RegOp`] values in evaluation order
     pub fn iter_asm(&self) -> impl Iterator<Item = RegOp> + '_ {
         self.asm.iter().cloned().rev()
+    }
+
+    /// Looks up a native shell topology by sidecar index.
+    pub fn shell_topology(
+        &self,
+        index: u32,
+    ) -> Option<&std::sync::Arc<crate::shell::ShellTopology>> {
+        self.asm.shell_topology(index)
+    }
+
+    /// Returns the native shell topology sidecar table.
+    pub fn shell_topologies(
+        &self,
+    ) -> &[std::sync::Arc<crate::shell::ShellTopology>] {
+        &self.asm.shells
     }
 
     /// Pretty-prints the inner SSA tape

@@ -62,6 +62,7 @@ pub mod compiler;
 pub mod eval;
 pub mod render;
 pub mod shape;
+pub mod shell;
 pub mod types;
 pub mod var;
 pub mod vm;

@@ -1,6 +1,6 @@
 use crate::{
     DistancePixel, GeometryBuffer, Image, LeafDebugBuffer, RenderConfig,
-    TileSizesRef,
+    TileSizesRef, VoxelRenderStats,
 };
 use fidget_core::{
     eval::Function,
@@ -166,6 +166,14 @@ impl VoxelRenderConfig<'_> {
         self.run_with_vars::<F>(shape, &ShapeVars::new())
     }
 
+    /// Render a shape in 3D and return internal renderer stats.
+    pub fn run_with_stats<F: Function>(
+        &self,
+        shape: Shape<F>,
+    ) -> Option<(GeometryBuffer, VoxelRenderStats)> {
+        self.run_with_vars_with_stats::<F>(shape, &ShapeVars::new())
+    }
+
     /// Render a shape in 3D using this configuration and variables
     pub fn run_with_vars<F: Function>(
         &self,
@@ -173,6 +181,15 @@ impl VoxelRenderConfig<'_> {
         vars: &ShapeVars<f32>,
     ) -> Option<GeometryBuffer> {
         crate::render3d::<F>(shape, vars, self)
+    }
+
+    /// Render a shape in 3D with variables and return internal renderer stats.
+    pub fn run_with_vars_with_stats<F: Function>(
+        &self,
+        shape: Shape<F>,
+        vars: &ShapeVars<f32>,
+    ) -> Option<(GeometryBuffer, VoxelRenderStats)> {
+        crate::render3d_with_stats::<F>(shape, vars, self)
     }
 
     /// Render leaf-center debug samples in 3D using this configuration.

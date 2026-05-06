@@ -63,6 +63,16 @@ fn run_vm(vm_text: &str) -> Result<ScriptContext> {
     })
 }
 
+pub(crate) fn evaluate_script(
+    script_type: ScriptType,
+    script: &str,
+) -> Result<ScriptContext> {
+    match script_type {
+        ScriptType::Rhai => Engine::new().run(script).map_err(Into::into),
+        ScriptType::Vm => run_vm(script),
+    }
+}
+
 /// Engine for evaluating a Rhai script with Fidget-specific bindings
 pub struct Engine {
     engine: rhai::Engine,

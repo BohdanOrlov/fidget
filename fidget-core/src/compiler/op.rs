@@ -152,7 +152,8 @@ opcodes!(
     /// Each "register" represents an SSA slot, which is never reused.
     #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
     pub enum SsaOp<u32> {
-        // default variants
+        /// Native shell distance with shell table index and x/y/z registers.
+        ShellDistance(u32, u32, u32, u32, u32),
     }
 );
 
@@ -206,7 +207,8 @@ impl SsaOp {
             | SsaOp::AndRegImm(out, ..)
             | SsaOp::AndRegReg(out, ..)
             | SsaOp::OrRegImm(out, ..)
-            | SsaOp::OrRegReg(out, ..) => Some(*out),
+            | SsaOp::OrRegReg(out, ..)
+            | SsaOp::ShellDistance(out, ..) => Some(*out),
             SsaOp::Output(..) => None,
         }
     }
@@ -252,7 +254,8 @@ impl SsaOp {
             | SsaOp::CompareImmReg(..)
             | SsaOp::ModRegReg(..)
             | SsaOp::ModRegImm(..)
-            | SsaOp::ModImmReg(..) => false,
+            | SsaOp::ModImmReg(..)
+            | SsaOp::ShellDistance(..) => false,
             SsaOp::MinRegImm(..)
             | SsaOp::MaxRegImm(..)
             | SsaOp::MinRegReg(..)
@@ -277,7 +280,9 @@ opcodes!(
     /// targeting physical hardware) may choose to use fewer.
     #[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
     pub enum RegOp<u8> {
-        // default variants
+        /// Native shell distance with shell table index and x/y/z registers.
+        ShellDistance(u8, u32, u8, u8, u8),
+
         /// Read from a memory slot to a register
         Load(u8, u32),
 

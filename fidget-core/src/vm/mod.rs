@@ -9,6 +9,10 @@ use crate::{
     },
     render::{RenderHints, TileSizes},
     shape::Shape,
+    shell::{
+        ShellEvalScratch, ShellTopology, eval_shell_distance,
+        eval_shell_interval,
+    },
     types::{Grad, Interval},
     var::VarMap,
 };
@@ -288,11 +292,57 @@ impl<T> std::ops::IndexMut<u32> for SlotArray<'_, T> {
 
 ////////////////////////////////////////////////////////////////////////////////
 
+fn eval_shell_sample(
+    shell: &ShellTopology,
+    scratch: &mut ShellEvalScratch,
+    x: f32,
+    y: f32,
+    z: f32,
+) -> f32 {
+    eval_shell_distance(
+        shell,
+        crate::shell::ShellParamsView::empty(),
+        scratch,
+        x,
+        y,
+        z,
+    )
+    .distance
+}
+
+fn eval_shell_grad(
+    shell: &ShellTopology,
+    scratch: &mut ShellEvalScratch,
+    x: Grad,
+    y: Grad,
+    z: Grad,
+) -> Grad {
+    let eps = 1.0e-3;
+    let value = eval_shell_sample(shell, scratch, x.v, y.v, z.v);
+    let dx = (eval_shell_sample(shell, scratch, x.v + eps, y.v, z.v)
+        - eval_shell_sample(shell, scratch, x.v - eps, y.v, z.v))
+        / (2.0 * eps);
+    let dy = (eval_shell_sample(shell, scratch, x.v, y.v + eps, z.v)
+        - eval_shell_sample(shell, scratch, x.v, y.v - eps, z.v))
+        / (2.0 * eps);
+    let dz = (eval_shell_sample(shell, scratch, x.v, y.v, z.v + eps)
+        - eval_shell_sample(shell, scratch, x.v, y.v, z.v - eps))
+        / (2.0 * eps);
+
+    Grad::new(
+        value,
+        dx.mul_add(x.dx, dy.mul_add(y.dx, dz * z.dx)),
+        dx.mul_add(x.dy, dy.mul_add(y.dy, dz * z.dy)),
+        dx.mul_add(x.dz, dy.mul_add(y.dz, dz * z.dz)),
+    )
+}
+
 /// Generic VM evaluator for tracing evaluation
 struct TracingVmEval<T> {
     slots: Vec<T>,
     out: Vec<T>,
     choices: VmTrace,
+    shell_scratch: ShellEvalScratch,
 }
 
 impl<T> Default for TracingVmEval<T> {
@@ -301,6 +351,7 @@ impl<T> Default for TracingVmEval<T> {
             slots: Vec::default(),
             out: Vec::default(),
             choices: VmTrace::default(),
+            shell_scratch: ShellEvalScratch::default(),
         }
     }
 }
@@ -402,6 +453,12 @@ impl<const N: usize> TracingEvaluator for VmIntervalEval<N> {
                     };
                 }
                 RegOp::CopyReg(out, arg) => v[out] = v[arg],
+                RegOp::ShellDistance(out, shell, x, y, z) => {
+                    let shell = tape.shell_topology(shell).expect(
+                        "shell sidecar should exist during interval eval",
+                    );
+                    v[out] = eval_shell_interval(shell, v[x], v[y], v[z]);
+                }
                 RegOp::AddRegImm(out, arg, imm) => {
                     v[out] = v[arg] + imm.into();
                 }
@@ -630,6 +687,18 @@ impl<const N: usize> TracingEvaluator for VmPointEval<N> {
                 RegOp::CopyReg(out, arg) => {
                     v[out] = v[arg];
                 }
+                RegOp::ShellDistance(out, shell, x, y, z) => {
+                    let shell = tape
+                        .shell_topology(shell)
+                        .expect("shell sidecar should exist during point eval");
+                    v[out] = eval_shell_sample(
+                        shell,
+                        &mut self.0.shell_scratch,
+                        v[x],
+                        v[y],
+                        v[z],
+                    );
+                }
                 RegOp::AddRegImm(out, arg, imm) => {
                     v[out] = v[arg] + imm;
                 }
@@ -856,6 +925,9 @@ struct BulkVmEval<T> {
 
     /// Output array
     out: Vec<Vec<T>>,
+
+    /// Reusable native shell scratch.
+    shell_scratch: ShellEvalScratch,
 }
 
 impl<T: From<f32> + Clone> BulkVmEval<T> {
@@ -994,6 +1066,20 @@ impl<const N: usize> BulkEvaluator for VmFloatSliceEval<N> {
                 RegOp::CopyReg(out, arg) => {
                     for i in 0..size {
                         v[out][i] = v[arg][i];
+                    }
+                }
+                RegOp::ShellDistance(out, shell, x, y, z) => {
+                    let shell = tape
+                        .shell_topology(shell)
+                        .expect("shell sidecar should exist during float eval");
+                    for i in 0..size {
+                        v[out][i] = eval_shell_sample(
+                            shell,
+                            &mut self.0.shell_scratch,
+                            v[x][i],
+                            v[y][i],
+                            v[z][i],
+                        );
                     }
                 }
                 RegOp::AddRegImm(out, arg, imm) => {
@@ -1308,6 +1394,20 @@ impl<const N: usize> BulkEvaluator for VmGradSliceEval<N> {
                 RegOp::CopyReg(out, arg) => {
                     for i in 0..size {
                         v[out][i] = v[arg][i];
+                    }
+                }
+                RegOp::ShellDistance(out, shell, x, y, z) => {
+                    let shell = tape
+                        .shell_topology(shell)
+                        .expect("shell sidecar should exist during grad eval");
+                    for i in 0..size {
+                        v[out][i] = eval_shell_grad(
+                            shell,
+                            &mut self.0.shell_scratch,
+                            v[x][i],
+                            v[y][i],
+                            v[z][i],
+                        );
                     }
                 }
                 RegOp::AddRegImm(out, arg, imm) => {

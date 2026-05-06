@@ -2,12 +2,14 @@
 use crate::{
     Context,
     compiler::SsaOp,
-    context::{BadNode, BinaryOpcode, Node, Op, UnaryOpcode},
+    context::{BadNode, BinaryOpcode, Node, Op, ShellOpKey, UnaryOpcode},
+    shell::ShellTopology,
     var::VarMap,
 };
 use serde::{Deserialize, Serialize};
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// Instruction tape, storing [opcodes in SSA form](crate::compiler::SsaOp)
 ///
@@ -29,6 +31,10 @@ pub struct SsaTape {
 
     /// Number of output operations in the tape
     pub output_count: usize,
+
+    /// Native shell topology sidecar table.
+    #[serde(skip)]
+    pub(crate) shells: Vec<Arc<ShellTopology>>,
 }
 
 impl SsaTape {
@@ -42,6 +48,8 @@ impl SsaTape {
     ) -> Result<(Self, VarMap), BadNode> {
         let mut mapping = HashMap::new();
         let mut parent_count: HashMap<Node, usize> = HashMap::new();
+        let mut shell_mapping: HashMap<ShellOpKey, u32> = HashMap::new();
+        let mut shells = Vec::new();
         let mut slot_count = 0;
 
         // Get either a node or constant index
@@ -67,6 +75,17 @@ impl SsaTape {
                 _ => {
                     if let Op::Input(v) = op {
                         vars.insert(*v);
+                    }
+                    if let Op::Shell(key, ..) = op {
+                        shell_mapping.entry(*key).or_insert_with(|| {
+                            let index = shells.len() as u32;
+                            let shell = ctx
+                                .shell_topology(*key)
+                                .expect("shell key should exist during SSA construction")
+                                .clone();
+                            shells.push(shell);
+                            index
+                        });
                     }
                     let i = slot_count;
                     slot_count += 1;
@@ -242,6 +261,25 @@ impl SsaTape {
                     };
                     op(i, lhs)
                 }
+                Op::Shell(key, x, y, z) => {
+                    let shell = shell_mapping[key];
+                    let mut extra_ops = Vec::new();
+                    let mut slot_to_reg = |slot: Slot| match slot {
+                        Slot::Reg(reg) => reg,
+                        Slot::Immediate(imm) => {
+                            let reg = slot_count;
+                            slot_count += 1;
+                            extra_ops.push(SsaOp::CopyImm(reg, imm));
+                            reg
+                        }
+                    };
+                    let x = slot_to_reg(mapping[x]);
+                    let y = slot_to_reg(mapping[y]);
+                    let z = slot_to_reg(mapping[z]);
+                    tape.push(SsaOp::ShellDistance(i, shell, x, y, z));
+                    tape.extend(extra_ops);
+                    continue;
+                }
             };
             tape.push(op);
         }
@@ -251,6 +289,7 @@ impl SsaTape {
                 tape,
                 choice_count,
                 output_count: roots.len(),
+                shells,
             },
             vars,
         ))
@@ -277,6 +316,8 @@ impl SsaTape {
     pub fn reset(&mut self) {
         self.tape.clear();
         self.choice_count = 0;
+        self.output_count = 0;
+        self.shells.clear();
     }
     /// Pretty-prints the given tape to `stdout`
     pub fn pretty_print(&self) {
@@ -401,6 +442,9 @@ impl SsaTape {
                 }
                 SsaOp::CopyImm(out, imm) => {
                     println!("${out} = COPY {imm}");
+                }
+                SsaOp::ShellDistance(out, shell, x, y, z) => {
+                    println!("${out} = SHELL[{shell}] ${x} ${y} ${z}");
                 }
             }
         }

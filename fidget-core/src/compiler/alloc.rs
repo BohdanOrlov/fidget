@@ -318,6 +318,78 @@ impl<const N: usize> RegisterAllocator<N> {
             | SsaOp::ModRegReg(..)
             | SsaOp::AndRegReg(..)
             | SsaOp::OrRegReg(..) => self.op_reg_reg(op),
+
+            SsaOp::ShellDistance(..) => self.op_shell_distance(op),
+        }
+    }
+
+    fn op_shell_distance(&mut self, op: SsaOp) {
+        let SsaOp::ShellDistance(out, shell, x, y, z) = op else {
+            panic!("Bad opcode: {op:?}");
+        };
+        assert!(
+            N >= 4,
+            "native shell register allocation requires at least 4 registers"
+        );
+
+        let r_out = self.get_out_reg(out);
+        let args = [x, y, z];
+        let mut regs = [0u8; 3];
+        let mut out_rebind = None;
+        let mut pending_binds = [(UNASSIGNED, 0u8); 3];
+        let mut pending_count = 0usize;
+
+        for (i, arg) in args.into_iter().enumerate() {
+            if let Some((_, reg)) = pending_binds[..pending_count]
+                .iter()
+                .find(|(pending, _)| *pending == arg)
+            {
+                regs[i] = *reg;
+                continue;
+            }
+            if out_rebind == Some(arg) {
+                regs[i] = r_out;
+                continue;
+            }
+
+            match self.get_allocation(arg) {
+                Allocation::Register(reg) => regs[i] = reg,
+                Allocation::Memory(mem) => {
+                    let reg = self.get_register();
+                    self.push_store(reg, mem);
+                    regs[i] = reg;
+                    pending_binds[pending_count] = (arg, reg);
+                    pending_count += 1;
+                }
+                Allocation::Unassigned => {
+                    if out_rebind.is_none() {
+                        out_rebind = Some(arg);
+                        regs[i] = r_out;
+                    } else {
+                        let reg = self.get_register();
+                        regs[i] = reg;
+                        pending_binds[pending_count] = (arg, reg);
+                        pending_count += 1;
+                    }
+                }
+            }
+        }
+
+        self.out.push(RegOp::ShellDistance(
+            r_out, shell, regs[0], regs[1], regs[2],
+        ));
+
+        if let Some(arg) = out_rebind {
+            self.rebind_register(arg, r_out);
+        } else {
+            self.release_reg(r_out);
+        }
+        for (arg, reg) in pending_binds[..pending_count].iter().copied() {
+            match self.get_allocation(arg) {
+                Allocation::Unassigned => self.bind_register(arg, reg),
+                Allocation::Memory(_) => self.bind_register(arg, reg),
+                Allocation::Register(_) => {}
+            }
         }
     }
 

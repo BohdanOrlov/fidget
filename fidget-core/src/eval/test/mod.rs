@@ -6,6 +6,14 @@ pub mod point;
 
 // Internal-only tests
 #[cfg(test)] // not enabled for eval-tests
+mod shell_context;
+#[cfg(test)] // not enabled for eval-tests
+mod shell_interval;
+#[cfg(test)] // not enabled for eval-tests
+mod shell_kernel;
+#[cfg(test)] // not enabled for eval-tests
+mod shell_tape;
+#[cfg(test)] // not enabled for eval-tests
 mod symbolic_deriv;
 
 use crate::{
@@ -13,6 +21,10 @@ use crate::{
     eval::Tape,
     var::Var,
 };
+
+#[cfg(test)]
+static SHELL_EVAL_STATS_TEST_LOCK: std::sync::Mutex<()> =
+    std::sync::Mutex::new(());
 
 /// Builds a function which stresses the register allocator and function caller
 pub fn build_stress_fn(n: usize) -> (Context, Node) {

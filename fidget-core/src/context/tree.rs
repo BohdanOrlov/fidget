@@ -1,6 +1,10 @@
 //! Context-free math trees
 use super::op::{BinaryOpcode, UnaryOpcode};
-use crate::{context::NotAVar, var::Var};
+use crate::{
+    context::NotAVar,
+    shell::{ShellOpKind, ShellTopology},
+    var::Var,
+};
 use std::{cmp::Ordering, sync::Arc};
 
 /// Opcode type for trees
@@ -16,6 +20,12 @@ pub enum TreeOp {
     Const(f64),
     Binary(BinaryOpcode, Arc<TreeOp>, Arc<TreeOp>),
     Unary(UnaryOpcode, Arc<TreeOp>),
+    Shell {
+        shell: Arc<ShellTopology>,
+        x: Arc<TreeOp>,
+        y: Arc<TreeOp>,
+        z: Arc<TreeOp>,
+    },
     /// Lazy remapping of trees
     ///
     /// When imported into a `Context`, all `x/y/z` clauses within `target` will
@@ -78,6 +88,7 @@ impl TreeOp {
             TreeOp::Const(..) | TreeOp::Input(..) => [None, None, None, None],
             TreeOp::Unary(_op, arg) => [Some(arg), None, None, None],
             TreeOp::Binary(_op, lhs, rhs) => [Some(lhs), Some(rhs), None, None],
+            TreeOp::Shell { x, y, z, .. } => [Some(x), Some(y), Some(z), None],
             TreeOp::RemapAxes { target, x, y, z } => {
                 [Some(target), Some(x), Some(y), Some(z)]
             }
@@ -94,6 +105,7 @@ impl TreeOp {
             TreeOp::Const(..) | TreeOp::Input(..) => [None, None, None, None],
             TreeOp::Unary(_op, arg) => [Some(arg), None, None, None],
             TreeOp::Binary(_op, lhs, rhs) => [Some(lhs), Some(rhs), None, None],
+            TreeOp::Shell { x, y, z, .. } => [Some(x), Some(y), Some(z), None],
             TreeOp::RemapAxes { target, x, y, z } => {
                 [Some(target), Some(x), Some(y), Some(z)]
             }
@@ -188,6 +200,27 @@ impl PartialEq for Tree {
                     todo.push((rhs_a, rhs_b));
                 }
                 (
+                    TreeOp::Shell {
+                        shell: shell_a,
+                        x: x_a,
+                        y: y_a,
+                        z: z_a,
+                    },
+                    TreeOp::Shell {
+                        shell: shell_b,
+                        x: x_b,
+                        y: y_b,
+                        z: z_b,
+                    },
+                ) => {
+                    if !Arc::ptr_eq(shell_a, shell_b) && shell_a != shell_b {
+                        return false;
+                    }
+                    todo.push((x_a, x_b));
+                    todo.push((y_a, y_b));
+                    todo.push((z_a, z_b));
+                }
+                (
                     TreeOp::RemapAxes {
                         target: t_a,
                         x: x_a,
@@ -233,6 +266,42 @@ impl Tree {
     /// Returns an `(x, y, z)` tuple
     pub fn axes() -> (Self, Self, Self) {
         (Self::x(), Self::y(), Self::z())
+    }
+
+    /// Builds a native shell distance tree with explicit coordinate children.
+    pub fn shell_distance(
+        shell: Arc<ShellTopology>,
+        x: Tree,
+        y: Tree,
+        z: Tree,
+    ) -> Self {
+        Tree(Arc::new(TreeOp::Shell {
+            shell,
+            x: x.0,
+            y: y.0,
+            z: z.0,
+        }))
+    }
+
+    /// Builds a native line-loft shell tree over default `x`, `y`, `z` axes.
+    pub fn line_loft_shell(shell: Arc<ShellTopology>) -> Self {
+        debug_assert!(matches!(shell.kind, ShellOpKind::LineLoft));
+        let (x, y, z) = Self::axes();
+        Self::shell_distance(shell, x, y, z)
+    }
+
+    /// Builds a native curve-loft shell tree over default `x`, `y`, `z` axes.
+    pub fn curve_loft_shell(shell: Arc<ShellTopology>) -> Self {
+        debug_assert!(matches!(shell.kind, ShellOpKind::CurveLoft));
+        let (x, y, z) = Self::axes();
+        Self::shell_distance(shell, x, y, z)
+    }
+
+    /// Builds a native shell-hull tree over default `x`, `y`, `z` axes.
+    pub fn shell_hull(shell: Arc<ShellTopology>) -> Self {
+        debug_assert!(matches!(shell.kind, ShellOpKind::ShellHull));
+        let (x, y, z) = Self::axes();
+        Self::shell_distance(shell, x, y, z)
     }
 
     /// Returns a pointer to the inner [`TreeOp`]

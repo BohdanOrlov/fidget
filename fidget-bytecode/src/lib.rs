@@ -51,6 +51,21 @@ use zerocopy::IntoBytes;
 #[error("register 255 is reserved")]
 pub struct ReservedRegister;
 
+/// Error type for bytecode construction.
+#[derive(thiserror::Error, Debug, PartialEq)]
+pub enum BytecodeBuildError {
+    /// The register allocator used register 255, which is reserved by the
+    /// bytecode format for immediates.
+    #[error(transparent)]
+    ReservedRegister(#[from] ReservedRegister),
+
+    /// The current bytecode format cannot serialize native shell ops.
+    #[error(
+        "native shell bytecode is unsupported by the current bytecode format"
+    )]
+    UnsupportedNativeShell,
+}
+
 /// Operations in the bytecode tape
 #[derive(
     Copy,
@@ -147,6 +162,9 @@ impl From<RegOp> for BytecodeOp {
             | RegOp::ModImmReg(..) => BytecodeOp::Mod,
             RegOp::AndRegReg(..) | RegOp::AndRegImm(..) => BytecodeOp::And,
             RegOp::OrRegReg(..) | RegOp::OrRegImm(..) => BytecodeOp::Or,
+            RegOp::ShellDistance(..) => {
+                panic!("native shell bytecode is not implemented")
+            }
         }
     }
 }
@@ -189,10 +207,12 @@ impl Bytecode {
 
     /// Builds a new bytecode object from VM data
     ///
-    /// Returns an error if the reserved register (255) is in use
+    /// Returns an error if the reserved register (255) is in use or if the
+    /// tape contains native operations unsupported by the current bytecode
+    /// format.
     pub fn new<const N: usize>(
         t: &VmData<N>,
-    ) -> Result<Self, ReservedRegister> {
+    ) -> Result<Self, BytecodeBuildError> {
         // The initial opcode is `OP_JUMP 0x0000_0000`
         let mut data = vec![u32::MAX, 0u32];
         let mut reg_count = 0u8;
@@ -202,7 +222,7 @@ impl Bytecode {
             let mut imm = None;
             let mut store_reg = |i, r| {
                 if r == u8::MAX {
-                    Err(ReservedRegister)
+                    Err(BytecodeBuildError::ReservedRegister(ReservedRegister))
                 } else {
                     reg_count = reg_count.max(r); // update the max reg
                     word[i] = r;
@@ -298,6 +318,9 @@ impl Bytecode {
                     store_reg(2, lhs)?;
                     store_reg(3, rhs)?;
                 }
+                RegOp::ShellDistance(..) => {
+                    return Err(BytecodeBuildError::UnsupportedNativeShell);
+                }
             };
             word[0] = BytecodeOp::from(op) as u8;
             data.push(u32::from_le_bytes(word));
@@ -357,5 +380,31 @@ mod test {
         assert_eq!(next(), 0xFFFFFFFF); // end marker
         assert_eq!(next(), 0xFFFFFFFF);
         assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn native_shell_bytecode_fails_explicitly() {
+        use fidget_core::{
+            context::Tree,
+            shell::{ShellSectionTopology, ShellTopology},
+        };
+        use std::sync::Arc;
+
+        let shell = Arc::new(ShellTopology::line_loft_circles(
+            vec![
+                ShellSectionTopology::circle(0.0, 0.0, 0.0, 1.0),
+                ShellSectionTopology::circle(2.0, 0.0, 0.0, 1.0),
+            ]
+            .into_boxed_slice(),
+        ));
+        let tree = Tree::line_loft_shell(shell);
+        let mut ctx = fidget_core::Context::new();
+        let root = ctx.import(&tree);
+        let data = VmData::<255>::new(&ctx, &[root]).unwrap();
+
+        assert!(matches!(
+            Bytecode::new(&data),
+            Err(BytecodeBuildError::UnsupportedNativeShell)
+        ));
     }
 }

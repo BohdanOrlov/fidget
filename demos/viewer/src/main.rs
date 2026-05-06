@@ -20,13 +20,14 @@ use std::{error::Error, path::Path};
 mod draw2d;
 mod draw3d;
 mod script;
+mod ship;
 mod watcher;
 
-/// Minimal viewer, using Fidget to render a `.rhai` or `.vm` script
+/// Minimal viewer, using Fidget to render a `.rhai`, `.vm`, or built-in target
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct Args {
-    /// File to watch (`.rhai` or `.vm`)
+    /// Primary target (`.rhai`, `.vm`, or built-in `ship*`)
     target: String,
 }
 
@@ -34,6 +35,9 @@ struct RenderSettings {
     image_size: fidget::render::ImageSize,
     mode: RenderMode,
 }
+
+const MAX_INTERACTIVE_RENDER_EDGE: u32 = 512;
+const MAX_INTERACTIVE_VOXEL_DEPTH: u32 = 192;
 
 enum ImageData {
     Rgba(Vec<Vec<[u8; 4]>>),
@@ -130,13 +134,8 @@ where
                     ImageData::Rgba(data)
                 }
                 RenderMode::ThreeD { canvas, mode } => {
-                    // XXX allow selection of depth?
-                    let image_size = render_config.image_size;
-                    let voxel_size = fidget::render::VoxelSize::new(
-                        image_size.width(),
-                        image_size.height(),
-                        image_size.width().max(image_size.height()),
-                    );
+                    let voxel_size =
+                        viewer_voxel_size(render_config.image_size);
                     let data = out
                         .shapes
                         .iter()
@@ -222,6 +221,93 @@ fn render_3d<F: fidget::eval::Function + fidget::render::RenderHints>(
     data
 }
 
+fn viewer_voxel_size(
+    image_size: fidget::render::ImageSize,
+) -> fidget::render::VoxelSize {
+    fidget::render::VoxelSize::new(
+        image_size.width(),
+        image_size.height(),
+        image_size
+            .width()
+            .max(image_size.height())
+            .min(MAX_INTERACTIVE_VOXEL_DEPTH),
+    )
+}
+
+fn fit_image_size_to_max_edge(
+    width: u32,
+    height: u32,
+    max_edge: u32,
+) -> fidget::render::ImageSize {
+    let width = width.max(1);
+    let height = height.max(1);
+    let max_edge = max_edge.max(1);
+    let largest = width.max(height);
+
+    if largest <= max_edge {
+        return fidget::render::ImageSize::new(width, height);
+    }
+
+    let scale = max_edge as f32 / largest as f32;
+    fidget::render::ImageSize::new(
+        ((width as f32 * scale).round() as u32).max(1),
+        ((height as f32 * scale).round() as u32).max(1),
+    )
+}
+
+fn render_image_size_for_rect(
+    size: egui::Vec2,
+    pixels_per_point: f32,
+) -> fidget::render::ImageSize {
+    fit_image_size_to_max_edge(
+        (size.x * pixels_per_point).round() as u32,
+        (size.y * pixels_per_point).round() as u32,
+        MAX_INTERACTIVE_RENDER_EDGE,
+    )
+}
+
+fn cursor_to_render_pixel(
+    pos_in_rect: egui::Vec2,
+    rect_size: egui::Vec2,
+    image_size: fidget::render::ImageSize,
+) -> Point2<i32> {
+    let width = rect_size.x.max(1.0);
+    let height = rect_size.y.max(1.0);
+    let x = (pos_in_rect.x / width) * image_size.width() as f32;
+    let y = (pos_in_rect.y / height) * image_size.height() as f32;
+    Point2::new(x.round() as i32, y.round() as i32)
+}
+
+fn read_script_text(path: &Path) -> Result<String, String> {
+    std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read {}: {e}", path.display()))
+}
+
+fn load_script_context(
+    path: &Path,
+    script_type: script::ScriptType,
+) -> Result<script::ScriptContext, String> {
+    let script = read_script_text(path)?;
+    script::evaluate_script(script_type, &script)
+        .map_err(|e| format!("failed to evaluate {}: {e}", path.display()))
+}
+
+fn load_target_context(target: &str) -> Result<script::ScriptContext, String> {
+    if let Some(tree) = ship::build_builtin_ship_tree(target) {
+        return Ok(script::ScriptContext {
+            shapes: vec![script::DrawShape {
+                tree,
+                color_rgb: [u8::MAX; 3],
+            }],
+        });
+    }
+
+    let path = Path::new(target);
+    let script_type = script::ScriptType::from_path(path)
+        .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+    load_script_context(path, script_type)
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     env_logger::Builder::from_env(Env::default().default_filter_or("info"))
         .init();
@@ -245,21 +331,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (config_tx, config_rx) = unbounded();
     let (wake_tx, wake_rx) = unbounded();
 
-    let path = Path::new(&args.target).to_owned();
-    let script_type = script::ScriptType::from_path(&path)?;
-    std::thread::spawn(move || {
-        let _ = watcher::file_watcher_thread(
-            &path,
-            file_watcher_rx,
-            rhai_script_tx,
-        );
-        info!("file watcher thread is done");
-    });
-    std::thread::spawn(move || {
-        let _ =
-            script::script_thread(script_type, rhai_script_rx, rhai_result_tx);
-        info!("script thread is done");
-    });
     std::thread::spawn(move || {
         #[cfg(feature = "jit")]
         type F = fidget::jit::JitFunction;
@@ -272,22 +343,55 @@ fn main() -> Result<(), Box<dyn Error>> {
         info!("render thread is done");
     });
 
-    // Automatically select the best implementation for your platform.
-    let mut watcher = notify::recommended_watcher(
-        move |res: Result<Event, notify::Error>| match res {
-            Ok(event) => {
-                info!("file watcher: {event:?}");
-                if let EventKind::Modify(..) = event.kind {
-                    file_watcher_tx.send(()).unwrap()
-                }
+    let _file_change_watcher = if ship::is_builtin_ship_target(&args.target) {
+        match load_target_context(&args.target) {
+            Ok(ctx) => {
+                rhai_result_tx.send(Ok(ctx)).unwrap();
             }
-            Err(e) => panic!("watch error: {e:?}"),
-        },
-    )
-    .unwrap();
-    watcher
-        .watch(Path::new(&args.target), notify::RecursiveMode::NonRecursive)
+            Err(err) => {
+                rhai_result_tx.send(Err(err)).unwrap();
+            }
+        }
+        info!("loaded built-in target: {}", args.target);
+        None
+    } else {
+        let primary_path = Path::new(&args.target).to_owned();
+        let primary_type = script::ScriptType::from_path(&primary_path)?;
+        std::thread::spawn(move || {
+            let _ = watcher::file_watcher_thread(
+                &primary_path,
+                file_watcher_rx,
+                rhai_script_tx,
+            );
+            info!("file watcher thread is done");
+        });
+        std::thread::spawn(move || {
+            let _ = script::script_thread(
+                primary_type,
+                rhai_script_rx,
+                rhai_result_tx,
+            );
+            info!("script thread is done");
+        });
+
+        // Automatically select the best implementation for your platform.
+        let mut watcher = notify::recommended_watcher(
+            move |res: Result<Event, notify::Error>| match res {
+                Ok(event) => {
+                    info!("file watcher: {event:?}");
+                    if let EventKind::Modify(..) = event.kind {
+                        file_watcher_tx.send(()).unwrap()
+                    }
+                }
+                Err(e) => panic!("watch error: {e:?}"),
+            },
+        )
         .unwrap();
+        watcher
+            .watch(Path::new(&args.target), notify::RecursiveMode::NonRecursive)
+            .unwrap();
+        Some(watcher)
+    };
 
     let mut options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
@@ -599,10 +703,8 @@ impl eframe::App for ViewerApp {
 
         let rect = ui.content_rect();
         let size = rect.size();
-        let image_size = fidget::render::ImageSize::new(
-            (size.x * ui.pixels_per_point()) as u32,
-            (size.y * ui.pixels_per_point()) as u32,
-        );
+        let image_size =
+            render_image_size_for_rect(size, ui.pixels_per_point());
 
         if image_size != self.image_size {
             self.image_size = image_size;
@@ -618,10 +720,7 @@ impl eframe::App for ViewerApp {
         // Handle pan and zoom
         match &mut self.mode {
             RenderMode::TwoD { canvas, .. } => {
-                let image_size = fidget::render::ImageSize::new(
-                    rect.width() as u32,
-                    rect.height() as u32,
-                );
+                let image_size = self.image_size;
 
                 let cursor_state =
                     match (r.interact_pointer_pos(), r.hover_pos()) {
@@ -632,9 +731,8 @@ impl eframe::App for ViewerApp {
                     .map(|(p, drag)| {
                         let p = p - rect.min;
                         CursorState {
-                            screen_pos: Point2::new(
-                                p.x.round() as i32,
-                                p.y.round() as i32,
+                            screen_pos: cursor_to_render_pixel(
+                                p, size, image_size,
                             ),
                             drag,
                         }
@@ -646,11 +744,7 @@ impl eframe::App for ViewerApp {
                 );
             }
             RenderMode::ThreeD { canvas, .. } => {
-                let image_size = fidget::render::VoxelSize::new(
-                    rect.width() as u32,
-                    rect.height() as u32,
-                    rect.width().max(rect.height()) as u32,
-                );
+                let image_size = viewer_voxel_size(self.image_size);
 
                 let cursor_state =
                     match (r.interact_pointer_pos(), r.hover_pos()) {
@@ -674,9 +768,10 @@ impl eframe::App for ViewerApp {
                     .map(|(p, drag)| {
                         let p = p - rect.min;
                         CursorState {
-                            screen_pos: Point2::new(
-                                p.x.round() as i32,
-                                p.y.round() as i32,
+                            screen_pos: cursor_to_render_pixel(
+                                p,
+                                size,
+                                self.image_size,
                             ),
                             drag,
                         }
@@ -698,5 +793,36 @@ impl eframe::App for ViewerApp {
                 })
                 .unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod viewer_render_size_tests {
+    use super::*;
+
+    #[test]
+    fn fit_image_size_preserves_small_targets() {
+        let size = fit_image_size_to_max_edge(320, 180, 512);
+
+        assert_eq!(size.width(), 320);
+        assert_eq!(size.height(), 180);
+    }
+
+    #[test]
+    fn fit_image_size_caps_largest_edge_and_preserves_aspect() {
+        let size = fit_image_size_to_max_edge(1280, 960, 512);
+
+        assert_eq!(size.width(), 512);
+        assert_eq!(size.height(), 384);
+    }
+
+    #[test]
+    fn viewer_voxel_depth_is_capped_separately_from_image_edge() {
+        let image_size = fit_image_size_to_max_edge(1280, 960, 512);
+        let voxel_size = viewer_voxel_size(image_size);
+
+        assert_eq!(voxel_size.width(), 512);
+        assert_eq!(voxel_size.height(), 384);
+        assert_eq!(voxel_size.depth(), MAX_INTERACTIVE_VOXEL_DEPTH);
     }
 }

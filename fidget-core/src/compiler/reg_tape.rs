@@ -1,12 +1,18 @@
 //! Tape used for evaluation
 use crate::compiler::{RegOp, RegisterAllocator, SsaTape};
+use crate::shell::ShellTopology;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Low-level tape for use with the Fidget virtual machine (or to be lowered
 /// further into machine instructions).
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct RegTape {
     tape: Vec<RegOp>,
+
+    /// Native shell topology sidecar table.
+    #[serde(skip)]
+    pub(crate) shells: Vec<Arc<ShellTopology>>,
 
     /// Total allocated slots
     pub(super) slot_count: u32,
@@ -24,13 +30,16 @@ impl RegTape {
         for &op in ssa.iter() {
             alloc.op(op)
         }
-        alloc.finalize()
+        let mut tape = alloc.finalize();
+        tape.shells = ssa.shells.clone();
+        tape
     }
 
     /// Builds a new empty tape
     pub(crate) fn empty() -> Self {
         Self {
             tape: vec![],
+            shells: vec![],
             slot_count: 0,
         }
     }
@@ -38,6 +47,7 @@ impl RegTape {
     /// Resets this tape, retaining its allocations
     pub fn reset(&mut self) {
         self.tape.clear();
+        self.shells.clear();
         self.slot_count = 0;
     }
 
@@ -68,6 +78,14 @@ impl RegTape {
     #[inline]
     pub(crate) fn push(&mut self, op: RegOp) {
         self.tape.push(op)
+    }
+
+    /// Looks up a shell topology by sidecar index.
+    pub(crate) fn shell_topology(
+        &self,
+        index: u32,
+    ) -> Option<&Arc<ShellTopology>> {
+        self.shells.get(index as usize)
     }
 }
 

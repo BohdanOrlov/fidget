@@ -1,9 +1,10 @@
 use crate::{
     Assembler, AssemblerData, CHOICE_BOTH, CHOICE_LEFT, CHOICE_RIGHT, IMM_REG,
-    OFFSET, REGISTER_LIMIT, interval::IntervalAssembler, mmap::Mmap, reg,
+    OFFSET, REGISTER_LIMIT, interval::IntervalAssembler, jit_shell_interval,
+    mmap::Mmap, reg,
 };
 use dynasmrt::{DynasmApi, DynasmError, dynasm};
-use fidget_core::types::Interval;
+use fidget_core::{shell::ShellTopology, types::Interval};
 
 /// Implementation for the interval assembler on `aarch64`
 ///
@@ -522,6 +523,24 @@ impl Assembler for IntervalAssembler {
         self.call_fn_binary(out_reg, lhs_reg, rhs_reg, interval_modulo);
     }
 
+    fn build_shell_distance(
+        &mut self,
+        out_reg: u8,
+        shell: *const ShellTopology,
+        x_reg: u8,
+        y_reg: u8,
+        z_reg: u8,
+    ) {
+        self.call_fn_shell_distance(
+            out_reg,
+            shell,
+            x_reg,
+            y_reg,
+            z_reg,
+            jit_shell_interval,
+        );
+    }
+
     fn build_atan2(&mut self, out_reg: u8, lhs_reg: u8, rhs_reg: u8) {
         extern "C" fn interval_atan2(lhs: Interval, rhs: Interval) -> Interval {
             lhs.atan2(rhs)
@@ -910,6 +929,81 @@ impl IntervalAssembler {
             ; ldp d30, d31, [sp, 0xc0]
 
             // Set our output value
+            ; mov V(reg(out_reg)).s[0], v0.s[0]
+            ; mov V(reg(out_reg)).s[1], v1.s[0]
+
+            // Restore registers
+            ; mov x0, x20
+            ; mov x1, x21
+            ; mov x2, x22
+            ; mov x3, x23
+        );
+    }
+
+    fn call_fn_shell_distance(
+        &mut self,
+        out_reg: u8,
+        shell: *const ShellTopology,
+        x_reg: u8,
+        y_reg: u8,
+        z_reg: u8,
+        f: extern "C" fn(
+            *const ShellTopology,
+            Interval,
+            Interval,
+            Interval,
+        ) -> Interval,
+    ) {
+        self.ensure_callee_regs_saved();
+        let addr = f as usize;
+        let shell = shell as usize;
+        dynasm!(self.0.ops
+            // Back up our current state to callee-saved registers
+            ; mov x20, x0
+            ; mov x21, x1
+            ; mov x22, x2
+            ; mov x23, x3
+
+            // Back up our state
+            ; stp d16, d17, [sp, 0x50]
+            ; stp d18, d19, [sp, 0x60]
+            ; stp d20, d21, [sp, 0x70]
+            ; stp d22, d23, [sp, 0x80]
+            ; stp d24, d25, [sp, 0x90]
+            ; stp d26, d27, [sp, 0xa0]
+            ; stp d28, d29, [sp, 0xb0]
+            ; stp d30, d31, [sp, 0xc0]
+
+            // Load helper address into x4 and shell pointer into x0.
+            ; movz x4, (addr >> 48) as u32 & 0xFFFF, lsl 48
+            ; movk x4, (addr >> 32) as u32 & 0xFFFF, lsl 32
+            ; movk x4, (addr >> 16) as u32 & 0xFFFF, lsl 16
+            ; movk x4, addr as u32 & 0xFFFF
+            ; movz x0, (shell >> 48) as u32 & 0xFFFF, lsl 48
+            ; movk x0, (shell >> 32) as u32 & 0xFFFF, lsl 32
+            ; movk x0, (shell >> 16) as u32 & 0xFFFF, lsl 16
+            ; movk x0, shell as u32 & 0xFFFF
+
+            // Prepare HFA interval arguments.
+            ; mov s0, V(reg(x_reg)).s[0]
+            ; mov s1, V(reg(x_reg)).s[1]
+            ; mov s2, V(reg(y_reg)).s[0]
+            ; mov s3, V(reg(y_reg)).s[1]
+            ; mov s4, V(reg(z_reg)).s[0]
+            ; mov s5, V(reg(z_reg)).s[1]
+            ; blr x4
+
+            // Restore floating-point state
+            ; ldp d16, d17, [sp, 0x50]
+            ; ldp d18, d19, [sp, 0x60]
+            ; ldp d20, d21, [sp, 0x70]
+            ; ldp d22, d23, [sp, 0x80]
+            ; ldp d24, d25, [sp, 0x90]
+            ; ldp d26, d27, [sp, 0xa0]
+            ; ldp d28, d29, [sp, 0xb0]
+            ; ldp d30, d31, [sp, 0xc0]
+
+            // Set our output interval.
             ; mov V(reg(out_reg)).s[0], v0.s[0]
             ; mov V(reg(out_reg)).s[1], v1.s[0]
 

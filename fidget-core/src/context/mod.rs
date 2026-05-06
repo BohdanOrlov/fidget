@@ -20,10 +20,15 @@ mod op;
 mod tree;
 
 use indexed::{Index, IndexMap, IndexVec, define_index};
-pub use op::{BinaryOpcode, Op, UnaryOpcode};
+pub use op::{BinaryOpcode, Op, ShellOpKey, UnaryOpcode};
 pub use tree::{Tree, TreeOp};
 
-use crate::var::Var;
+use crate::{
+    shell::{
+        ShellEvalScratch, ShellParamsView, ShellTopology, eval_shell_distance,
+    },
+    var::Var,
+};
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
@@ -48,6 +53,8 @@ define_index!(Node, "An index in the `Context::ops` map");
 #[derive(Debug, Default)]
 pub struct Context {
     ops: IndexMap<Op, Node>,
+    shell_topologies: Vec<Arc<ShellTopology>>,
+    shell_lookup: HashMap<usize, ShellOpKey>,
 }
 
 impl Context {
@@ -69,6 +76,8 @@ impl Context {
     /// ```
     pub fn clear(&mut self) {
         self.ops.clear();
+        self.shell_topologies.clear();
+        self.shell_lookup.clear();
     }
 
     /// Returns the number of [`Op`] nodes in the context
@@ -179,6 +188,40 @@ impl Context {
     /// ```
     pub fn constant(&mut self, f: f64) -> Node {
         self.ops.insert(Op::Const(OrderedFloat(f)))
+    }
+
+    fn shell_key(&mut self, shell: Arc<ShellTopology>) -> ShellOpKey {
+        let ptr = Arc::as_ptr(&shell) as usize;
+        if let Some(key) = self.shell_lookup.get(&ptr) {
+            return *key;
+        }
+        let key = ShellOpKey(self.shell_topologies.len());
+        self.shell_topologies.push(shell);
+        self.shell_lookup.insert(ptr, key);
+        key
+    }
+
+    /// Looks up a native shell topology by sidecar key.
+    pub fn shell_topology(
+        &self,
+        key: ShellOpKey,
+    ) -> Option<&Arc<ShellTopology>> {
+        self.shell_topologies.get(key.0)
+    }
+
+    /// Builds a native shell distance node.
+    pub fn shell<X: IntoNode, Y: IntoNode, Z: IntoNode>(
+        &mut self,
+        shell: Arc<ShellTopology>,
+        x: X,
+        y: Y,
+        z: Z,
+    ) -> Result<Node, BadNode> {
+        let x = x.into_node(self)?;
+        let y = y.into_node(self)?;
+        let z = z.into_node(self)?;
+        let key = self.shell_key(shell);
+        Ok(self.ops.insert(Op::Shell(key, x, y, z)))
     }
 
     ////////////////////////////////////////////////////////////////////////////
@@ -832,6 +875,24 @@ impl Context {
                 let a = get(*a)?;
                 op.eval(a)
             }
+            Op::Shell(key, x, y, z) => {
+                let x = get(*x)? as f32;
+                let y = get(*y)? as f32;
+                let z = get(*z)? as f32;
+                let shell = self
+                    .shell_topology(*key)
+                    .ok_or(EvalError::BadShellKey(*key))?;
+                let mut scratch = ShellEvalScratch::default();
+                eval_shell_distance(
+                    shell,
+                    ShellParamsView::empty(),
+                    &mut scratch,
+                    x,
+                    y,
+                    z,
+                )
+                .distance as f64
+            }
         };
 
         cache[node] = Some(v);
@@ -977,6 +1038,7 @@ impl Context {
                 UnaryOpcode::Ln => out += "ln",
                 UnaryOpcode::Not => out += "not",
             },
+            Op::Shell(..) => out += "shell",
         };
         write!(
             out,
@@ -1029,7 +1091,9 @@ impl Context {
                     // we can return the previous Node.
                     if matches!(
                         t.as_ref(),
-                        TreeOp::Unary(..) | TreeOp::Binary(..)
+                        TreeOp::Unary(..)
+                            | TreeOp::Binary(..)
+                            | TreeOp::Shell { .. }
                     ) && let Some(p) =
                         seen.get(&(*axes.last().unwrap(), Arc::as_ptr(t)))
                     {
@@ -1057,6 +1121,12 @@ impl Context {
                             todo.push(Action::Up(t));
                             todo.push(Action::Down(lhs));
                             todo.push(Action::Down(rhs));
+                        }
+                        TreeOp::Shell { x, y, z, .. } => {
+                            todo.push(Action::Up(t));
+                            todo.push(Action::Down(x));
+                            todo.push(Action::Down(y));
+                            todo.push(Action::Down(z));
                         }
                         TreeOp::RemapAxes { target: _, x, y, z } => {
                             // Action::Up(t) does the remapping and target eval
@@ -1133,6 +1203,20 @@ impl Context {
                             }
                             stack.push(out);
                         }
+                        TreeOp::Shell { shell, .. } => {
+                            let x = stack.pop().unwrap();
+                            let y = stack.pop().unwrap();
+                            let z = stack.pop().unwrap();
+                            let out =
+                                self.shell(shell.clone(), x, y, z).unwrap();
+                            if Arc::strong_count(t) > 1 {
+                                seen.insert(
+                                    (*axes.last().unwrap(), Arc::as_ptr(t)),
+                                    out,
+                                );
+                            }
+                            stack.push(out);
+                        }
                         TreeOp::RemapAxes { target, .. } => {
                             let x = stack.pop().unwrap();
                             let y = stack.pop().unwrap();
@@ -1149,7 +1233,9 @@ impl Context {
                     // isn't perfect, but it doesn't need to be for correctness.
                     if matches!(
                         t.as_ref(),
-                        TreeOp::Unary(..) | TreeOp::Binary(..)
+                        TreeOp::Unary(..)
+                            | TreeOp::Binary(..)
+                            | TreeOp::Shell { .. }
                     ) && Arc::strong_count(t) > 1
                     {
                         seen.insert(
@@ -1219,6 +1305,12 @@ impl Context {
                             todo.push(Action::Down(*lhs));
                             todo.push(Action::Down(*rhs));
                         }
+                        Op::Shell(_key, x, y, z) => {
+                            todo.push(Action::Up(n, *op));
+                            todo.push(Action::Down(*x));
+                            todo.push(Action::Down(*y));
+                            todo.push(Action::Down(*z));
+                        }
                     }
                 }
                 Action::Up(n, op) => match op {
@@ -1238,6 +1330,23 @@ impl Context {
                             lhs.arc().clone(),
                             rhs.arc().clone(),
                         ));
+                        seen.insert(n, out.clone());
+                        stack.push(out);
+                    }
+                    Op::Shell(key, ..) => {
+                        let x = stack.pop().unwrap();
+                        let y = stack.pop().unwrap();
+                        let z = stack.pop().unwrap();
+                        let shell = self
+                            .shell_topology(key)
+                            .expect("shell key should exist during export")
+                            .clone();
+                        let out = Tree::from(TreeOp::Shell {
+                            shell,
+                            x: x.arc().clone(),
+                            y: y.arc().clone(),
+                            z: z.arc().clone(),
+                        });
                         seen.insert(n, out.clone());
                         stack.push(out);
                     }
@@ -1297,6 +1406,9 @@ impl Context {
                             todo.push(Action::Up(n, op));
                             todo.push(Action::Down(lhs));
                             todo.push(Action::Down(rhs));
+                        }
+                        Op::Shell(..) => {
+                            todo.push(Action::Up(n, op));
                         }
                     }
                 }
@@ -1456,6 +1568,11 @@ impl Context {
                         seen.insert(n, out);
                         stack.push(out);
                     }
+                    Op::Shell(..) => {
+                        panic!(
+                            "symbolic derivative for native shell nodes is not implemented"
+                        );
+                    }
                 },
             }
         }
@@ -1528,6 +1645,10 @@ pub enum EvalError {
     /// Node is missing from the context
     #[error(transparent)]
     BadNode(#[from] BadNode),
+
+    /// Shell topology sidecar key is missing
+    #[error("shell topology sidecar key {0:?} is missing")]
+    BadShellKey(ShellOpKey),
 }
 
 ////////////////////////////////////////////////////////////////////////////////

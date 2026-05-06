@@ -1,9 +1,9 @@
 use crate::{
     Assembler, AssemblerData, IMM_REG, OFFSET, REGISTER_LIMIT,
-    grad_slice::GradSliceAssembler, mmap::Mmap, reg,
+    grad_slice::GradSliceAssembler, jit_shell_grad_ptr, mmap::Mmap, reg,
 };
 use dynasmrt::{DynasmApi, DynasmError, DynasmLabelApi, dynasm};
-use fidget_core::types::Grad;
+use fidget_core::{shell::ShellTopology, types::Grad};
 
 /// Implementation for the gradient slice assembler on `aarch64`
 ///
@@ -81,7 +81,7 @@ use fidget_core::types::Grad;
 /// | 0x8      | `sp` (`x30`) | Stack frame                                 |
 /// | 0x0      | `fp` (`x29`) | [current value for sp]                      |
 /// ```
-const STACK_SIZE: u32 = 0x220;
+const STACK_SIZE: u32 = 0x250;
 
 #[expect(clippy::useless_conversion)]
 impl Assembler for GradSliceAssembler {
@@ -420,6 +420,24 @@ impl Assembler for GradSliceAssembler {
         self.call_fn_binary(out_reg, lhs_reg, rhs_reg, grad_modulo);
     }
 
+    fn build_shell_distance(
+        &mut self,
+        out_reg: u8,
+        shell: *const ShellTopology,
+        x_reg: u8,
+        y_reg: u8,
+        z_reg: u8,
+    ) {
+        self.call_fn_shell_distance(
+            out_reg,
+            shell,
+            x_reg,
+            y_reg,
+            z_reg,
+            jit_shell_grad_ptr,
+        );
+    }
+
     fn build_not(&mut self, out_reg: u8, arg_reg: u8) {
         dynasm!(self.0.ops
             ; fcmeq s6, S(reg(arg_reg)), 0.0
@@ -699,6 +717,93 @@ impl GradSliceAssembler {
             ; ldr q2, [sp, 0x1f0]
 
             // Restore our current state
+            ; mov x0, x20
+            ; mov x1, x21
+            ; mov x2, x22
+            ; mov x3, x23
+        );
+    }
+
+    fn call_fn_shell_distance(
+        &mut self,
+        out_reg: u8,
+        shell: *const ShellTopology,
+        x_reg: u8,
+        y_reg: u8,
+        z_reg: u8,
+        f: extern "C" fn(
+            *const ShellTopology,
+            *const Grad,
+            *const Grad,
+            *const Grad,
+            *mut Grad,
+        ),
+    ) {
+        let addr = f as usize;
+        let shell = shell as usize;
+        dynasm!(self.0.ops
+            // Back up our current state
+            ; mov x20, x0
+            ; mov x21, x1
+            ; mov x22, x2
+            ; mov x23, x3
+
+            // Back up scratch values and SIMD tape registers.
+            ; stp q0, q1, [sp, 0x1d0]
+            ; str q2, [sp, 0x1f0]
+            ; stp q8, q9, [sp, 0x50]
+            ; stp q10, q11, [sp, 0x70]
+            ; stp q12, q13, [sp, 0x90]
+            ; stp q14, q15, [sp, 0xb0]
+            ; stp q16, q17, [sp, 0xd0]
+            ; stp q18, q19, [sp, 0xf0]
+            ; stp q20, q21, [sp, 0x110]
+            ; stp q22, q23, [sp, 0x130]
+            ; stp q24, q25, [sp, 0x150]
+            ; stp q26, q27, [sp, 0x170]
+            ; stp q28, q29, [sp, 0x190]
+            ; stp q30, q31, [sp, 0x1b0]
+
+            // Store Grad arguments into spill slots above the fixed frame.
+            ; str Q(reg(x_reg)), [sp, 0x220]
+            ; str Q(reg(y_reg)), [sp, 0x230]
+            ; str Q(reg(z_reg)), [sp, 0x240]
+
+            // Load helper address into x5 and shell pointer into x0.
+            ; movz x5, (addr >> 48) as u32 & 0xFFFF, lsl 48
+            ; movk x5, (addr >> 32) as u32 & 0xFFFF, lsl 32
+            ; movk x5, (addr >> 16) as u32 & 0xFFFF, lsl 16
+            ; movk x5, addr as u32 & 0xFFFF
+            ; movz x0, (shell >> 48) as u32 & 0xFFFF, lsl 48
+            ; movk x0, (shell >> 32) as u32 & 0xFFFF, lsl 32
+            ; movk x0, (shell >> 16) as u32 & 0xFFFF, lsl 16
+            ; movk x0, shell as u32 & 0xFFFF
+            ; add x1, sp, 0x220
+            ; add x2, sp, 0x230
+            ; add x3, sp, 0x240
+            ; add x4, sp, 0x220
+            ; blr x5
+
+            // Restore register state.
+            ; ldp q8, q9, [sp, 0x50]
+            ; ldp q10, q11, [sp, 0x70]
+            ; ldp q12, q13, [sp, 0x90]
+            ; ldp q14, q15, [sp, 0xb0]
+            ; ldp q16, q17, [sp, 0xd0]
+            ; ldp q18, q19, [sp, 0xf0]
+            ; ldp q20, q21, [sp, 0x110]
+            ; ldp q22, q23, [sp, 0x130]
+            ; ldp q24, q25, [sp, 0x150]
+            ; ldp q26, q27, [sp, 0x170]
+            ; ldp q28, q29, [sp, 0x190]
+            ; ldp q30, q31, [sp, 0x1b0]
+
+            // Copy helper output into the out register before restoring q0-q2.
+            ; ldr Q(reg(out_reg)), [sp, 0x220]
+
+            // Restore scratch values and argument registers.
+            ; ldp q0, q1, [sp, 0x1d0]
+            ; ldr q2, [sp, 0x1f0]
             ; mov x0, x20
             ; mov x1, x21
             ; mov x2, x22

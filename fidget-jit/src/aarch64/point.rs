@@ -1,8 +1,10 @@
 use crate::{
     Assembler, AssemblerData, CHOICE_BOTH, CHOICE_LEFT, CHOICE_RIGHT, IMM_REG,
-    OFFSET, REGISTER_LIMIT, mmap::Mmap, point::PointAssembler, reg,
+    OFFSET, REGISTER_LIMIT, jit_shell_point, mmap::Mmap, point::PointAssembler,
+    reg,
 };
 use dynasmrt::{DynasmApi, DynasmError, dynasm};
+use fidget_core::shell::ShellTopology;
 
 /// Implementation for the single-point assembler on `aarch64`
 ///
@@ -335,6 +337,24 @@ impl Assembler for PointAssembler {
         )
     }
 
+    fn build_shell_distance(
+        &mut self,
+        out_reg: u8,
+        shell: *const ShellTopology,
+        x_reg: u8,
+        y_reg: u8,
+        z_reg: u8,
+    ) {
+        self.call_fn_shell_distance(
+            out_reg,
+            shell,
+            x_reg,
+            y_reg,
+            z_reg,
+            jit_shell_point,
+        );
+    }
+
     fn build_not(&mut self, out_reg: u8, arg_reg: u8) {
         dynasm!(self.0.ops
             ; fcmeq s6, S(reg(arg_reg)), 0.0
@@ -606,6 +626,71 @@ impl PointAssembler {
             ; mov x0, x20
             ; mov x1, x21
             ; mov x2, x22
+        );
+    }
+
+    fn call_fn_shell_distance(
+        &mut self,
+        out_reg: u8,
+        shell: *const ShellTopology,
+        x_reg: u8,
+        y_reg: u8,
+        z_reg: u8,
+        f: extern "C" fn(*const ShellTopology, f32, f32, f32) -> f32,
+    ) {
+        self.ensure_callee_regs_saved();
+        let addr = f as usize;
+        let shell = shell as usize;
+        dynasm!(self.0.ops
+            // Back up our current state to callee-saved registers
+            ; mov x20, x0
+            ; mov x21, x1
+            ; mov x22, x2
+            ; mov x23, x3
+
+            // Back up caller-saved tape registers
+            ; stp s16, s17, [sp, 0x50]
+            ; stp s18, s19, [sp, 0x58]
+            ; stp s20, s21, [sp, 0x60]
+            ; stp s22, s23, [sp, 0x68]
+            ; stp s24, s25, [sp, 0x70]
+            ; stp s26, s27, [sp, 0x78]
+            ; stp s28, s29, [sp, 0x80]
+            ; stp s30, s31, [sp, 0x88]
+
+            // Load helper address into x4 and shell pointer into x0.
+            ; movz x4, (addr >> 48) as u32 & 0xFFFF, lsl 48
+            ; movk x4, (addr >> 32) as u32 & 0xFFFF, lsl 32
+            ; movk x4, (addr >> 16) as u32 & 0xFFFF, lsl 16
+            ; movk x4, addr as u32 & 0xFFFF
+            ; movz x0, (shell >> 48) as u32 & 0xFFFF, lsl 48
+            ; movk x0, (shell >> 32) as u32 & 0xFFFF, lsl 32
+            ; movk x0, (shell >> 16) as u32 & 0xFFFF, lsl 16
+            ; movk x0, shell as u32 & 0xFFFF
+
+            ; fmov s0, S(reg(x_reg))
+            ; fmov s1, S(reg(y_reg))
+            ; fmov s2, S(reg(z_reg))
+            ; blr x4
+
+            // Restore floating-point state
+            ; ldp s16, s17, [sp, 0x50]
+            ; ldp s18, s19, [sp, 0x58]
+            ; ldp s20, s21, [sp, 0x60]
+            ; ldp s22, s23, [sp, 0x68]
+            ; ldp s24, s25, [sp, 0x70]
+            ; ldp s26, s27, [sp, 0x78]
+            ; ldp s28, s29, [sp, 0x80]
+            ; ldp s30, s31, [sp, 0x88]
+
+            // Set our output value
+            ; fmov S(reg(out_reg)), s0
+
+            // Restore registers
+            ; mov x0, x20
+            ; mov x1, x21
+            ; mov x2, x22
+            ; mov x3, x23
         );
     }
 }

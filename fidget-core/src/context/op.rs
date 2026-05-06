@@ -4,6 +4,10 @@ use crate::{
 };
 use ordered_float::OrderedFloat;
 
+/// Key into a [`Context`](crate::context::Context) shell topology sidecar.
+#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
+pub struct ShellOpKey(pub(crate) usize);
+
 /// A one-argument math operation
 #[allow(missing_docs)]
 #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
@@ -119,6 +123,7 @@ pub enum Op {
     Const(OrderedFloat<f64>),
     Binary(BinaryOpcode, Node, Node),
     Unary(UnaryOpcode, Node),
+    Shell(ShellOpKey, Node, Node, Node),
 }
 
 fn dot_color_to_rgb(s: &str) -> &'static str {
@@ -137,6 +142,7 @@ impl Op {
         match self {
             Op::Const(..) => "green",
             Op::Input(..) => "red",
+            Op::Shell(..) => "dodgerblue",
             Op::Binary(BinaryOpcode::Min | BinaryOpcode::Max, ..) => {
                 "dodgerblue"
             }
@@ -149,16 +155,17 @@ impl Op {
         match self {
             Op::Const(..) => "oval",
             Op::Input(..) => "circle",
-            Op::Binary(..) | Op::Unary(..) => "box",
+            Op::Binary(..) | Op::Unary(..) | Op::Shell(..) => "box",
         }
     }
 
-    /// Iterates over children, producing 0, 1, or 2 values
+    /// Iterates over children, producing 0, 1, 2, or 3 values
     pub fn iter_children(&self) -> impl Iterator<Item = Node> {
         let out = match self {
-            Op::Binary(_, a, b) => [Some(*a), Some(*b)],
-            Op::Unary(_, a) => [Some(*a), None],
-            Op::Input(..) | Op::Const(..) => [None, None],
+            Op::Binary(_, a, b) => [Some(*a), Some(*b), None],
+            Op::Unary(_, a) => [Some(*a), None, None],
+            Op::Shell(_, x, y, z) => [Some(*x), Some(*y), Some(*z)],
+            Op::Input(..) | Op::Const(..) => [None, None, None],
         };
         out.into_iter().flatten()
     }

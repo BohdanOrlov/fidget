@@ -20,9 +20,13 @@ mod render3d;
 pub mod effects;
 pub use config::{ImageRenderConfig, VoxelRenderConfig};
 pub use render2d::DistancePixel;
+pub use render3d::VoxelRenderStats;
 
 use render2d::render as render2d;
-use render3d::{render as render3d, render_leaf_debug as render3d_leaf_debug};
+use render3d::{
+    render as render3d, render_leaf_debug as render3d_leaf_debug,
+    render_with_stats as render3d_with_stats,
+};
 
 /// Helper struct to borrow from [`TileSizes`]
 ///

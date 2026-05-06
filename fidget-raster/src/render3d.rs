@@ -8,6 +8,9 @@ use crate::{
 use fidget_core::{
     eval::Function,
     shape::{Shape, ShapeBulkEval, ShapeTracingEval, ShapeVars},
+    shell::{
+        reset_shell_eval_stats, set_shell_eval_stats_enabled, shell_eval_stats,
+    },
     types::{Grad, Interval},
 };
 
@@ -67,26 +70,52 @@ struct Worker<'a, F: Function> {
 
     /// Output images for this specific tile
     out: GeometryBuffer,
-    stats: Render3dStats,
+    stats: VoxelRenderStats,
 }
 
-#[derive(Clone, Copy, Default)]
-struct Render3dStats {
-    total_tile_time: Duration,
-    interval_eval_time: Duration,
-    simplify_time: Duration,
-    float_eval_time: Duration,
-    grad_eval_time: Duration,
-    interval_eval_calls: u64,
-    simplify_calls: u64,
-    float_eval_calls: u64,
-    grad_eval_calls: u64,
-    float_eval_samples: u64,
-    grad_eval_samples: u64,
+/// Aggregated counters and timings from one 3D voxel render.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VoxelRenderStats {
+    /// Aggregated worker tile time.
+    pub total_tile_time: Duration,
+    /// Time spent in interval evaluation.
+    pub interval_eval_time: Duration,
+    /// Time spent simplifying traced shapes.
+    pub simplify_time: Duration,
+    /// Time spent in scalar float-slice evaluation.
+    pub float_eval_time: Duration,
+    /// Time spent in gradient-slice evaluation.
+    pub grad_eval_time: Duration,
+    /// Number of interval evaluations.
+    pub interval_eval_calls: u64,
+    /// Number of shape simplification calls.
+    pub simplify_calls: u64,
+    /// Number of float-slice evaluation calls.
+    pub float_eval_calls: u64,
+    /// Number of gradient-slice evaluation calls.
+    pub grad_eval_calls: u64,
+    /// Number of scalar distance samples evaluated.
+    pub float_eval_samples: u64,
+    /// Number of gradient samples evaluated.
+    pub grad_eval_samples: u64,
+    /// Calls into native shell 2D profile evaluator.
+    pub shell_hull_profile2d_calls: u64,
+    /// Native shell 2D profile boundary segment tests.
+    pub shell_hull_profile2d_segment_tests: u64,
+    /// Native shell 2D quadratic-Bezier edge tests.
+    pub shell_hull_profile2d_bezier_tests: u64,
+    /// Native shell 2D profile fallback count.
+    pub shell_hull_profile2d_fallbacks: u64,
+    /// Native shell interval calls.
+    pub shell_interval_calls: u64,
+    /// Native shell interval hot-loop allocation count.
+    pub shell_interval_hot_loop_allocations: u64,
+    /// Native shell hot-loop allocation count.
+    pub shell_hot_loop_allocations: u64,
 }
 
-impl Render3dStats {
-    fn merge(&mut self, other: Render3dStats) {
+impl VoxelRenderStats {
+    fn merge(&mut self, other: VoxelRenderStats) {
         self.total_tile_time += other.total_tile_time;
         self.interval_eval_time += other.interval_eval_time;
         self.simplify_time += other.simplify_time;
@@ -98,12 +127,23 @@ impl Render3dStats {
         self.grad_eval_calls += other.grad_eval_calls;
         self.float_eval_samples += other.float_eval_samples;
         self.grad_eval_samples += other.grad_eval_samples;
+        self.shell_hull_profile2d_calls += other.shell_hull_profile2d_calls;
+        self.shell_hull_profile2d_segment_tests +=
+            other.shell_hull_profile2d_segment_tests;
+        self.shell_hull_profile2d_bezier_tests +=
+            other.shell_hull_profile2d_bezier_tests;
+        self.shell_hull_profile2d_fallbacks +=
+            other.shell_hull_profile2d_fallbacks;
+        self.shell_interval_calls += other.shell_interval_calls;
+        self.shell_interval_hot_loop_allocations +=
+            other.shell_interval_hot_loop_allocations;
+        self.shell_hot_loop_allocations += other.shell_hot_loop_allocations;
     }
 }
 
 struct TileRenderOutput {
     image: GeometryBuffer,
-    stats: Render3dStats,
+    stats: VoxelRenderStats,
 }
 
 #[derive(Clone, Copy)]
@@ -129,12 +169,12 @@ struct DebugWorker<'a, F: Function> {
 
     /// Output images for this specific tile
     out: LeafDebugBuffer,
-    stats: Render3dStats,
+    stats: VoxelRenderStats,
 }
 
 struct TileDebugRenderOutput {
     image: LeafDebugBuffer,
-    stats: Render3dStats,
+    stats: VoxelRenderStats,
 }
 
 impl<'a, F: Function, T> RenderWorker<'a, F, T> for Worker<'a, F> {
@@ -168,7 +208,7 @@ impl<'a, F: Function, T> RenderWorker<'a, F, T> for Worker<'a, F> {
         vars: &ShapeVars<f32>,
         tile: super::config::Tile<2>,
     ) -> Self::Output {
-        self.stats = Render3dStats::default();
+        self.stats = VoxelRenderStats::default();
         let tile_start = Instant::now();
 
         // Prepare local tile data to fill out
@@ -222,7 +262,7 @@ impl<'a, F: Function, T> RenderWorker<'a, F, T> for DebugWorker<'a, F> {
         vars: &ShapeVars<f32>,
         tile: super::config::Tile<2>,
     ) -> Self::Output {
-        self.stats = Render3dStats::default();
+        self.stats = VoxelRenderStats::default();
         let tile_start = Instant::now();
 
         // Prepare local tile data to fill out
@@ -758,15 +798,31 @@ pub fn render<F: Function>(
     vars: &ShapeVars<f32>,
     config: &VoxelRenderConfig,
 ) -> Option<GeometryBuffer> {
+    render_with_stats(shape, vars, config).map(|(image, _stats)| image)
+}
+
+/// Renders the given tape into a 3D image and returns render stats.
+///
+/// This is the same traversal as [`render`], but returns the internal counters
+/// used for benchmark reporting.
+pub fn render_with_stats<F: Function>(
+    shape: Shape<F>,
+    vars: &ShapeVars<f32>,
+    config: &VoxelRenderConfig,
+) -> Option<(GeometryBuffer, VoxelRenderStats)> {
     let shape = shape.with_transform(config.mat());
 
+    let shell_stats_enabled =
+        std::env::var_os("FIDGET_RENDER3D_STATS").is_some();
+    set_shell_eval_stats_enabled(shell_stats_enabled);
+    reset_shell_eval_stats();
     let tiles = super::render_tiles::<F, Worker<F>, _>(shape, vars, config)?;
     let tile_sizes = config.tile_sizes();
 
     let width = config.image_size.width() as usize;
     let height = config.image_size.height() as usize;
     let mut image = GeometryBuffer::new(config.image_size);
-    let mut stats = Render3dStats::default();
+    let mut stats = VoxelRenderStats::default();
     let merge_start = Instant::now();
     for (tile, out) in tiles {
         stats.merge(out.stats);
@@ -796,8 +852,20 @@ pub fn render<F: Function>(
         }
     }
     let merge_time = merge_start.elapsed();
+    let shell_stats = shell_eval_stats();
+    stats.shell_hull_profile2d_calls = shell_stats.profile2d_calls;
+    stats.shell_hull_profile2d_segment_tests =
+        shell_stats.profile2d_segment_tests;
+    stats.shell_hull_profile2d_bezier_tests =
+        shell_stats.profile2d_bezier_tests;
+    stats.shell_hull_profile2d_fallbacks = shell_stats.profile2d_fallbacks;
+    stats.shell_interval_calls = shell_stats.interval_calls;
+    stats.shell_interval_hot_loop_allocations =
+        shell_stats.interval_hot_loop_allocations;
+    stats.shell_hot_loop_allocations = shell_stats.hot_loop_allocations;
+    set_shell_eval_stats_enabled(false);
 
-    if std::env::var_os("FIDGET_RENDER3D_STATS").is_some() {
+    if shell_stats_enabled {
         let measured_eval_time = stats.interval_eval_time
             + stats.simplify_time
             + stats.float_eval_time
@@ -823,8 +891,18 @@ pub fn render<F: Function>(
             stats.float_eval_samples,
             stats.grad_eval_samples,
         );
+        eprintln!(
+            "render3d shell counters: shell_hull_profile2d_calls={} shell_hull_profile2d_segment_tests={} shell_hull_profile2d_bezier_tests={} shell_hull_profile2d_fallbacks={} shell_interval_calls={} shell_interval_hot_loop_allocations={} shell_hot_loop_allocations={}",
+            stats.shell_hull_profile2d_calls,
+            stats.shell_hull_profile2d_segment_tests,
+            stats.shell_hull_profile2d_bezier_tests,
+            stats.shell_hull_profile2d_fallbacks,
+            stats.shell_interval_calls,
+            stats.shell_interval_hot_loop_allocations,
+            stats.shell_hot_loop_allocations,
+        );
     }
-    Some(image)
+    Some((image, stats))
 }
 
 /// Renders leaf-center debug samples into a 3D image according to the provided
@@ -839,6 +917,10 @@ pub fn render_leaf_debug<F: Function>(
 ) -> Option<LeafDebugBuffer> {
     let shape = shape.with_transform(config.mat());
 
+    let shell_stats_enabled =
+        std::env::var_os("FIDGET_RENDER3D_STATS").is_some();
+    set_shell_eval_stats_enabled(shell_stats_enabled);
+    reset_shell_eval_stats();
     let tiles =
         super::render_tiles::<F, DebugWorker<F>, _>(shape, vars, config)?;
     let tile_sizes = config.tile_sizes();
@@ -846,7 +928,7 @@ pub fn render_leaf_debug<F: Function>(
     let width = config.image_size.width() as usize;
     let height = config.image_size.height() as usize;
     let mut image = LeafDebugBuffer::new(config.image_size);
-    let mut stats = Render3dStats::default();
+    let mut stats = VoxelRenderStats::default();
     let merge_start = Instant::now();
     for (tile, out) in tiles {
         stats.merge(out.stats);
@@ -867,8 +949,20 @@ pub fn render_leaf_debug<F: Function>(
         }
     }
     let merge_time = merge_start.elapsed();
+    let shell_stats = shell_eval_stats();
+    stats.shell_hull_profile2d_calls = shell_stats.profile2d_calls;
+    stats.shell_hull_profile2d_segment_tests =
+        shell_stats.profile2d_segment_tests;
+    stats.shell_hull_profile2d_bezier_tests =
+        shell_stats.profile2d_bezier_tests;
+    stats.shell_hull_profile2d_fallbacks = shell_stats.profile2d_fallbacks;
+    stats.shell_interval_calls = shell_stats.interval_calls;
+    stats.shell_interval_hot_loop_allocations =
+        shell_stats.interval_hot_loop_allocations;
+    stats.shell_hot_loop_allocations = shell_stats.hot_loop_allocations;
+    set_shell_eval_stats_enabled(false);
 
-    if std::env::var_os("FIDGET_RENDER3D_STATS").is_some() {
+    if shell_stats_enabled {
         let measured_eval_time = stats.interval_eval_time
             + stats.simplify_time
             + stats.float_eval_time
@@ -893,6 +987,16 @@ pub fn render_leaf_debug<F: Function>(
             stats.grad_eval_calls,
             stats.float_eval_samples,
             stats.grad_eval_samples,
+        );
+        eprintln!(
+            "render3d leaf-debug shell counters: shell_hull_profile2d_calls={} shell_hull_profile2d_segment_tests={} shell_hull_profile2d_bezier_tests={} shell_hull_profile2d_fallbacks={} shell_interval_calls={} shell_interval_hot_loop_allocations={} shell_hot_loop_allocations={}",
+            stats.shell_hull_profile2d_calls,
+            stats.shell_hull_profile2d_segment_tests,
+            stats.shell_hull_profile2d_bezier_tests,
+            stats.shell_hull_profile2d_fallbacks,
+            stats.shell_interval_calls,
+            stats.shell_interval_hot_loop_allocations,
+            stats.shell_hot_loop_allocations,
         );
     }
 
