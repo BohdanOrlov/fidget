@@ -248,7 +248,7 @@ impl<const N: usize> Function for GenericVmFunction<N> {
 
 impl<const N: usize> RenderHints for GenericVmFunction<N> {
     fn tile_sizes_3d() -> TileSizes {
-        TileSizes::new(&[128, 64, 32, 16, 8]).unwrap()
+        TileSizes::new(&[8, 4, 2]).unwrap()
     }
 
     fn tile_sizes_2d() -> TileSizes {

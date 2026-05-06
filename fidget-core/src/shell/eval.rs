@@ -250,6 +250,7 @@ pub(crate) fn record_shell_interval_call() {
 }
 
 /// Evaluates a native shell distance at one point.
+#[inline(always)]
 pub fn eval_shell_distance(
     topology: &ShellTopology,
     params: ShellParamsView<'_>,
@@ -333,6 +334,7 @@ fn eval_solid_loft_with_radius_offset(
     best
 }
 
+#[inline(always)]
 fn eval_shell_hull(
     topology: &ShellTopology,
     params: ShellParamsView<'_>,
@@ -368,6 +370,7 @@ fn eval_shell_hull(
     best
 }
 
+#[inline(always)]
 fn eval_profile_shell_hull(
     topology: &ShellTopology,
     profile: &ShellProfileTopology,
@@ -405,6 +408,7 @@ fn eval_profile_shell_hull(
     best
 }
 
+#[inline(always)]
 fn eval_profile_solid(
     profile: &ShellProfileTopology,
     segment: ShellProfileSegmentTopology,
@@ -441,6 +445,7 @@ struct ProfileNodeSample {
     continuity: ShellProfileNodeContinuity,
 }
 
+#[inline(always)]
 fn eval_profile_section_sdf(
     profile: &ShellProfileTopology,
     segment: ShellProfileSegmentTopology,
@@ -535,6 +540,7 @@ fn sample_profile_nodes(
 
     node_count
 }
+
 fn profile_section_distance_sq_and_width(
     p: [f32; 2],
     nodes: &[ProfileNodeSample],

@@ -1088,7 +1088,7 @@ impl Function for JitFunction {
 
 impl RenderHints for JitFunction {
     fn tile_sizes_3d() -> TileSizes {
-        TileSizes::new(&[64, 16, 8]).unwrap()
+        TileSizes::new(&[12, 6, 3]).unwrap()
     }
 
     fn tile_sizes_2d() -> TileSizes {
