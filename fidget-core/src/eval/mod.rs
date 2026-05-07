@@ -57,6 +57,12 @@ pub trait Tape: Send + Sync + Clone {
 pub trait Trace {
     /// Copies the contents of `other` into `self`
     fn copy_from(&mut self, other: &Self);
+
+    /// Returns true if simplification may improve sidecar data without reducing
+    /// the visible tape size.
+    fn keep_simplified_shape(&self) -> bool {
+        false
+    }
 }
 
 impl<T: Copy + Clone + Default> Trace for Vec<T> {

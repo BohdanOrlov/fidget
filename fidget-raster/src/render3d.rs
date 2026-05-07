@@ -104,12 +104,60 @@ pub struct VoxelRenderStats {
     pub grad_eval_samples: u64,
     /// Calls into native shell 2D profile evaluator.
     pub shell_hull_profile2d_calls: u64,
+    /// Native shell 2D profile evaluator calls from distance sampling.
+    pub shell_hull_profile2d_distance_calls: u64,
+    /// Native shell 2D profile evaluator calls from gradient sampling.
+    pub shell_hull_profile2d_gradient_calls: u64,
     /// Native shell 2D profile boundary segment tests.
     pub shell_hull_profile2d_segment_tests: u64,
     /// Native shell 2D quadratic-Bezier edge tests.
     pub shell_hull_profile2d_bezier_tests: u64,
     /// Native shell 2D profile fallback count.
     pub shell_hull_profile2d_fallbacks: u64,
+    /// Native shell 2D candidate contour edges considered.
+    pub shell_hull_profile2d_edges_considered: u64,
+    /// Native shell 2D candidate contour edges pruned by AABB tests.
+    pub shell_hull_profile2d_edges_aabb_pruned: u64,
+    /// Native shell 2D candidate linear contour edges.
+    pub shell_hull_profile2d_linear_edges: u64,
+    /// Native shell 2D candidate smooth contour edges.
+    pub shell_hull_profile2d_smooth_edges: u64,
+    /// Native shell 2D profile calls where an endpoint remained closest.
+    pub shell_hull_profile2d_endpoint_best_kept: u64,
+    /// Native shell 2D smooth edges that reached Hermite refinement.
+    pub shell_hull_profile2d_hermite_edges_refined: u64,
+    /// Native shell 2D Hermite seed refinement attempts.
+    pub shell_hull_profile2d_hermite_seed_attempts: u64,
+    /// Native shell 2D Hermite Newton iterations.
+    pub shell_hull_profile2d_hermite_newton_iterations: u64,
+    /// Native shell 2D Hermite attempts that stopped after 1 iteration.
+    pub shell_hull_profile2d_hermite_iteration_1_attempts: u64,
+    /// Native shell 2D Hermite attempts that stopped after 2 iterations.
+    pub shell_hull_profile2d_hermite_iteration_2_attempts: u64,
+    /// Native shell 2D Hermite attempts that stopped after 3 iterations.
+    pub shell_hull_profile2d_hermite_iteration_3_attempts: u64,
+    /// Native shell 2D Hermite attempts that used all 4 iterations.
+    pub shell_hull_profile2d_hermite_iteration_4_attempts: u64,
+    /// Native shell 2D Hermite attempts clamped to an endpoint.
+    pub shell_hull_profile2d_hermite_clamped_endpoint_attempts: u64,
+    /// Native shell 2D Hermite attempts duplicating an earlier refined t.
+    pub shell_hull_profile2d_hermite_duplicate_t_attempts: u64,
+    /// Native shell 2D Hermite distance evaluations after deduping roots.
+    pub shell_hull_profile2d_hermite_distance_evaluations: u64,
+    /// Native shell 2D Hermite closest-point winner count.
+    pub shell_hull_profile2d_hermite_wins_total: u64,
+    /// Native shell 2D Hermite endpoint-seed wins.
+    pub shell_hull_profile2d_hermite_endpoint_wins: u64,
+    /// Native shell 2D Hermite quarter-seed wins.
+    pub shell_hull_profile2d_hermite_quarter_wins: u64,
+    /// Native shell 2D Hermite 0.25-seed wins.
+    pub shell_hull_profile2d_hermite_quarter_25_wins: u64,
+    /// Native shell 2D Hermite 0.50-seed wins.
+    pub shell_hull_profile2d_hermite_quarter_50_wins: u64,
+    /// Native shell 2D Hermite 0.75-seed wins.
+    pub shell_hull_profile2d_hermite_quarter_75_wins: u64,
+    /// Native shell 2D Hermite height-seed wins.
+    pub shell_hull_profile2d_hermite_height_wins: u64,
     /// Native shell interval calls.
     pub shell_interval_calls: u64,
     /// Native shell interval hot-loop allocation count.
@@ -132,12 +180,60 @@ impl VoxelRenderStats {
         self.float_eval_samples += other.float_eval_samples;
         self.grad_eval_samples += other.grad_eval_samples;
         self.shell_hull_profile2d_calls += other.shell_hull_profile2d_calls;
+        self.shell_hull_profile2d_distance_calls +=
+            other.shell_hull_profile2d_distance_calls;
+        self.shell_hull_profile2d_gradient_calls +=
+            other.shell_hull_profile2d_gradient_calls;
         self.shell_hull_profile2d_segment_tests +=
             other.shell_hull_profile2d_segment_tests;
         self.shell_hull_profile2d_bezier_tests +=
             other.shell_hull_profile2d_bezier_tests;
         self.shell_hull_profile2d_fallbacks +=
             other.shell_hull_profile2d_fallbacks;
+        self.shell_hull_profile2d_edges_considered +=
+            other.shell_hull_profile2d_edges_considered;
+        self.shell_hull_profile2d_edges_aabb_pruned +=
+            other.shell_hull_profile2d_edges_aabb_pruned;
+        self.shell_hull_profile2d_linear_edges +=
+            other.shell_hull_profile2d_linear_edges;
+        self.shell_hull_profile2d_smooth_edges +=
+            other.shell_hull_profile2d_smooth_edges;
+        self.shell_hull_profile2d_endpoint_best_kept +=
+            other.shell_hull_profile2d_endpoint_best_kept;
+        self.shell_hull_profile2d_hermite_edges_refined +=
+            other.shell_hull_profile2d_hermite_edges_refined;
+        self.shell_hull_profile2d_hermite_seed_attempts +=
+            other.shell_hull_profile2d_hermite_seed_attempts;
+        self.shell_hull_profile2d_hermite_newton_iterations +=
+            other.shell_hull_profile2d_hermite_newton_iterations;
+        self.shell_hull_profile2d_hermite_iteration_1_attempts +=
+            other.shell_hull_profile2d_hermite_iteration_1_attempts;
+        self.shell_hull_profile2d_hermite_iteration_2_attempts +=
+            other.shell_hull_profile2d_hermite_iteration_2_attempts;
+        self.shell_hull_profile2d_hermite_iteration_3_attempts +=
+            other.shell_hull_profile2d_hermite_iteration_3_attempts;
+        self.shell_hull_profile2d_hermite_iteration_4_attempts +=
+            other.shell_hull_profile2d_hermite_iteration_4_attempts;
+        self.shell_hull_profile2d_hermite_clamped_endpoint_attempts +=
+            other.shell_hull_profile2d_hermite_clamped_endpoint_attempts;
+        self.shell_hull_profile2d_hermite_duplicate_t_attempts +=
+            other.shell_hull_profile2d_hermite_duplicate_t_attempts;
+        self.shell_hull_profile2d_hermite_distance_evaluations +=
+            other.shell_hull_profile2d_hermite_distance_evaluations;
+        self.shell_hull_profile2d_hermite_wins_total +=
+            other.shell_hull_profile2d_hermite_wins_total;
+        self.shell_hull_profile2d_hermite_endpoint_wins +=
+            other.shell_hull_profile2d_hermite_endpoint_wins;
+        self.shell_hull_profile2d_hermite_quarter_wins +=
+            other.shell_hull_profile2d_hermite_quarter_wins;
+        self.shell_hull_profile2d_hermite_quarter_25_wins +=
+            other.shell_hull_profile2d_hermite_quarter_25_wins;
+        self.shell_hull_profile2d_hermite_quarter_50_wins +=
+            other.shell_hull_profile2d_hermite_quarter_50_wins;
+        self.shell_hull_profile2d_hermite_quarter_75_wins +=
+            other.shell_hull_profile2d_hermite_quarter_75_wins;
+        self.shell_hull_profile2d_hermite_height_wins +=
+            other.shell_hull_profile2d_hermite_height_wins;
         self.shell_interval_calls += other.shell_interval_calls;
         self.shell_interval_hot_loop_allocations +=
             other.shell_interval_hot_loop_allocations;
@@ -872,11 +968,59 @@ pub fn render_with_stats<F: Function>(
     let merge_time = merge_start.elapsed();
     let shell_stats = shell_eval_stats();
     stats.shell_hull_profile2d_calls = shell_stats.profile2d_calls;
+    stats.shell_hull_profile2d_distance_calls =
+        shell_stats.profile2d_distance_calls;
+    stats.shell_hull_profile2d_gradient_calls =
+        shell_stats.profile2d_gradient_calls;
     stats.shell_hull_profile2d_segment_tests =
         shell_stats.profile2d_segment_tests;
     stats.shell_hull_profile2d_bezier_tests =
         shell_stats.profile2d_bezier_tests;
     stats.shell_hull_profile2d_fallbacks = shell_stats.profile2d_fallbacks;
+    stats.shell_hull_profile2d_edges_considered =
+        shell_stats.profile2d_edges_considered;
+    stats.shell_hull_profile2d_edges_aabb_pruned =
+        shell_stats.profile2d_edges_aabb_pruned;
+    stats.shell_hull_profile2d_linear_edges =
+        shell_stats.profile2d_linear_edges;
+    stats.shell_hull_profile2d_smooth_edges =
+        shell_stats.profile2d_smooth_edges;
+    stats.shell_hull_profile2d_endpoint_best_kept =
+        shell_stats.profile2d_endpoint_best_kept;
+    stats.shell_hull_profile2d_hermite_edges_refined =
+        shell_stats.profile2d_hermite_edges_refined;
+    stats.shell_hull_profile2d_hermite_seed_attempts =
+        shell_stats.profile2d_hermite_seed_attempts;
+    stats.shell_hull_profile2d_hermite_newton_iterations =
+        shell_stats.profile2d_hermite_newton_iterations;
+    stats.shell_hull_profile2d_hermite_iteration_1_attempts =
+        shell_stats.profile2d_hermite_iteration_1_attempts;
+    stats.shell_hull_profile2d_hermite_iteration_2_attempts =
+        shell_stats.profile2d_hermite_iteration_2_attempts;
+    stats.shell_hull_profile2d_hermite_iteration_3_attempts =
+        shell_stats.profile2d_hermite_iteration_3_attempts;
+    stats.shell_hull_profile2d_hermite_iteration_4_attempts =
+        shell_stats.profile2d_hermite_iteration_4_attempts;
+    stats.shell_hull_profile2d_hermite_clamped_endpoint_attempts =
+        shell_stats.profile2d_hermite_clamped_endpoint_attempts;
+    stats.shell_hull_profile2d_hermite_duplicate_t_attempts =
+        shell_stats.profile2d_hermite_duplicate_t_attempts;
+    stats.shell_hull_profile2d_hermite_distance_evaluations =
+        shell_stats.profile2d_hermite_distance_evaluations;
+    stats.shell_hull_profile2d_hermite_wins_total =
+        shell_stats.profile2d_hermite_wins_total;
+    stats.shell_hull_profile2d_hermite_endpoint_wins =
+        shell_stats.profile2d_hermite_endpoint_wins;
+    stats.shell_hull_profile2d_hermite_quarter_wins =
+        shell_stats.profile2d_hermite_quarter_wins;
+    stats.shell_hull_profile2d_hermite_quarter_25_wins =
+        shell_stats.profile2d_hermite_quarter_25_wins;
+    stats.shell_hull_profile2d_hermite_quarter_50_wins =
+        shell_stats.profile2d_hermite_quarter_50_wins;
+    stats.shell_hull_profile2d_hermite_quarter_75_wins =
+        shell_stats.profile2d_hermite_quarter_75_wins;
+    stats.shell_hull_profile2d_hermite_height_wins =
+        shell_stats.profile2d_hermite_height_wins;
     stats.shell_interval_calls = shell_stats.interval_calls;
     stats.shell_interval_hot_loop_allocations =
         shell_stats.interval_hot_loop_allocations;
@@ -910,11 +1054,35 @@ pub fn render_with_stats<F: Function>(
             stats.grad_eval_samples,
         );
         eprintln!(
-            "render3d shell counters: shell_hull_profile2d_calls={} shell_hull_profile2d_segment_tests={} shell_hull_profile2d_bezier_tests={} shell_hull_profile2d_fallbacks={} shell_interval_calls={} shell_interval_hot_loop_allocations={} shell_hot_loop_allocations={}",
+            "render3d shell counters: shell_hull_profile2d_calls={} shell_hull_profile2d_distance_calls={} shell_hull_profile2d_gradient_calls={} shell_hull_profile2d_segment_tests={} shell_hull_profile2d_bezier_tests={} shell_hull_profile2d_fallbacks={} shell_hull_profile2d_edges_considered={} shell_hull_profile2d_edges_aabb_pruned={} shell_hull_profile2d_linear_edges={} shell_hull_profile2d_smooth_edges={} shell_hull_profile2d_endpoint_best_kept={} shell_hull_profile2d_hermite_edges_refined={} shell_hull_profile2d_hermite_seed_attempts={} shell_hull_profile2d_hermite_newton_iterations={} shell_hull_profile2d_hermite_iteration_1_attempts={} shell_hull_profile2d_hermite_iteration_2_attempts={} shell_hull_profile2d_hermite_iteration_3_attempts={} shell_hull_profile2d_hermite_iteration_4_attempts={} shell_hull_profile2d_hermite_clamped_endpoint_attempts={} shell_hull_profile2d_hermite_duplicate_t_attempts={} shell_hull_profile2d_hermite_distance_evaluations={} shell_hull_profile2d_hermite_wins_total={} shell_hull_profile2d_hermite_endpoint_wins={} shell_hull_profile2d_hermite_quarter_wins={} shell_hull_profile2d_hermite_quarter_25_wins={} shell_hull_profile2d_hermite_quarter_50_wins={} shell_hull_profile2d_hermite_quarter_75_wins={} shell_hull_profile2d_hermite_height_wins={} shell_interval_calls={} shell_interval_hot_loop_allocations={} shell_hot_loop_allocations={}",
             stats.shell_hull_profile2d_calls,
+            stats.shell_hull_profile2d_distance_calls,
+            stats.shell_hull_profile2d_gradient_calls,
             stats.shell_hull_profile2d_segment_tests,
             stats.shell_hull_profile2d_bezier_tests,
             stats.shell_hull_profile2d_fallbacks,
+            stats.shell_hull_profile2d_edges_considered,
+            stats.shell_hull_profile2d_edges_aabb_pruned,
+            stats.shell_hull_profile2d_linear_edges,
+            stats.shell_hull_profile2d_smooth_edges,
+            stats.shell_hull_profile2d_endpoint_best_kept,
+            stats.shell_hull_profile2d_hermite_edges_refined,
+            stats.shell_hull_profile2d_hermite_seed_attempts,
+            stats.shell_hull_profile2d_hermite_newton_iterations,
+            stats.shell_hull_profile2d_hermite_iteration_1_attempts,
+            stats.shell_hull_profile2d_hermite_iteration_2_attempts,
+            stats.shell_hull_profile2d_hermite_iteration_3_attempts,
+            stats.shell_hull_profile2d_hermite_iteration_4_attempts,
+            stats.shell_hull_profile2d_hermite_clamped_endpoint_attempts,
+            stats.shell_hull_profile2d_hermite_duplicate_t_attempts,
+            stats.shell_hull_profile2d_hermite_distance_evaluations,
+            stats.shell_hull_profile2d_hermite_wins_total,
+            stats.shell_hull_profile2d_hermite_endpoint_wins,
+            stats.shell_hull_profile2d_hermite_quarter_wins,
+            stats.shell_hull_profile2d_hermite_quarter_25_wins,
+            stats.shell_hull_profile2d_hermite_quarter_50_wins,
+            stats.shell_hull_profile2d_hermite_quarter_75_wins,
+            stats.shell_hull_profile2d_hermite_height_wins,
             stats.shell_interval_calls,
             stats.shell_interval_hot_loop_allocations,
             stats.shell_hot_loop_allocations,
@@ -974,6 +1142,38 @@ pub fn render_leaf_debug<F: Function>(
     stats.shell_hull_profile2d_bezier_tests =
         shell_stats.profile2d_bezier_tests;
     stats.shell_hull_profile2d_fallbacks = shell_stats.profile2d_fallbacks;
+    stats.shell_hull_profile2d_hermite_seed_attempts =
+        shell_stats.profile2d_hermite_seed_attempts;
+    stats.shell_hull_profile2d_hermite_newton_iterations =
+        shell_stats.profile2d_hermite_newton_iterations;
+    stats.shell_hull_profile2d_hermite_iteration_1_attempts =
+        shell_stats.profile2d_hermite_iteration_1_attempts;
+    stats.shell_hull_profile2d_hermite_iteration_2_attempts =
+        shell_stats.profile2d_hermite_iteration_2_attempts;
+    stats.shell_hull_profile2d_hermite_iteration_3_attempts =
+        shell_stats.profile2d_hermite_iteration_3_attempts;
+    stats.shell_hull_profile2d_hermite_iteration_4_attempts =
+        shell_stats.profile2d_hermite_iteration_4_attempts;
+    stats.shell_hull_profile2d_hermite_clamped_endpoint_attempts =
+        shell_stats.profile2d_hermite_clamped_endpoint_attempts;
+    stats.shell_hull_profile2d_hermite_duplicate_t_attempts =
+        shell_stats.profile2d_hermite_duplicate_t_attempts;
+    stats.shell_hull_profile2d_hermite_distance_evaluations =
+        shell_stats.profile2d_hermite_distance_evaluations;
+    stats.shell_hull_profile2d_hermite_wins_total =
+        shell_stats.profile2d_hermite_wins_total;
+    stats.shell_hull_profile2d_hermite_endpoint_wins =
+        shell_stats.profile2d_hermite_endpoint_wins;
+    stats.shell_hull_profile2d_hermite_quarter_wins =
+        shell_stats.profile2d_hermite_quarter_wins;
+    stats.shell_hull_profile2d_hermite_quarter_25_wins =
+        shell_stats.profile2d_hermite_quarter_25_wins;
+    stats.shell_hull_profile2d_hermite_quarter_50_wins =
+        shell_stats.profile2d_hermite_quarter_50_wins;
+    stats.shell_hull_profile2d_hermite_quarter_75_wins =
+        shell_stats.profile2d_hermite_quarter_75_wins;
+    stats.shell_hull_profile2d_hermite_height_wins =
+        shell_stats.profile2d_hermite_height_wins;
     stats.shell_interval_calls = shell_stats.interval_calls;
     stats.shell_interval_hot_loop_allocations =
         shell_stats.interval_hot_loop_allocations;
@@ -1007,11 +1207,35 @@ pub fn render_leaf_debug<F: Function>(
             stats.grad_eval_samples,
         );
         eprintln!(
-            "render3d leaf-debug shell counters: shell_hull_profile2d_calls={} shell_hull_profile2d_segment_tests={} shell_hull_profile2d_bezier_tests={} shell_hull_profile2d_fallbacks={} shell_interval_calls={} shell_interval_hot_loop_allocations={} shell_hot_loop_allocations={}",
+            "render3d leaf-debug shell counters: shell_hull_profile2d_calls={} shell_hull_profile2d_distance_calls={} shell_hull_profile2d_gradient_calls={} shell_hull_profile2d_segment_tests={} shell_hull_profile2d_bezier_tests={} shell_hull_profile2d_fallbacks={} shell_hull_profile2d_edges_considered={} shell_hull_profile2d_edges_aabb_pruned={} shell_hull_profile2d_linear_edges={} shell_hull_profile2d_smooth_edges={} shell_hull_profile2d_endpoint_best_kept={} shell_hull_profile2d_hermite_edges_refined={} shell_hull_profile2d_hermite_seed_attempts={} shell_hull_profile2d_hermite_newton_iterations={} shell_hull_profile2d_hermite_iteration_1_attempts={} shell_hull_profile2d_hermite_iteration_2_attempts={} shell_hull_profile2d_hermite_iteration_3_attempts={} shell_hull_profile2d_hermite_iteration_4_attempts={} shell_hull_profile2d_hermite_clamped_endpoint_attempts={} shell_hull_profile2d_hermite_duplicate_t_attempts={} shell_hull_profile2d_hermite_distance_evaluations={} shell_hull_profile2d_hermite_wins_total={} shell_hull_profile2d_hermite_endpoint_wins={} shell_hull_profile2d_hermite_quarter_wins={} shell_hull_profile2d_hermite_quarter_25_wins={} shell_hull_profile2d_hermite_quarter_50_wins={} shell_hull_profile2d_hermite_quarter_75_wins={} shell_hull_profile2d_hermite_height_wins={} shell_interval_calls={} shell_interval_hot_loop_allocations={} shell_hot_loop_allocations={}",
             stats.shell_hull_profile2d_calls,
+            stats.shell_hull_profile2d_distance_calls,
+            stats.shell_hull_profile2d_gradient_calls,
             stats.shell_hull_profile2d_segment_tests,
             stats.shell_hull_profile2d_bezier_tests,
             stats.shell_hull_profile2d_fallbacks,
+            stats.shell_hull_profile2d_edges_considered,
+            stats.shell_hull_profile2d_edges_aabb_pruned,
+            stats.shell_hull_profile2d_linear_edges,
+            stats.shell_hull_profile2d_smooth_edges,
+            stats.shell_hull_profile2d_endpoint_best_kept,
+            stats.shell_hull_profile2d_hermite_edges_refined,
+            stats.shell_hull_profile2d_hermite_seed_attempts,
+            stats.shell_hull_profile2d_hermite_newton_iterations,
+            stats.shell_hull_profile2d_hermite_iteration_1_attempts,
+            stats.shell_hull_profile2d_hermite_iteration_2_attempts,
+            stats.shell_hull_profile2d_hermite_iteration_3_attempts,
+            stats.shell_hull_profile2d_hermite_iteration_4_attempts,
+            stats.shell_hull_profile2d_hermite_clamped_endpoint_attempts,
+            stats.shell_hull_profile2d_hermite_duplicate_t_attempts,
+            stats.shell_hull_profile2d_hermite_distance_evaluations,
+            stats.shell_hull_profile2d_hermite_wins_total,
+            stats.shell_hull_profile2d_hermite_endpoint_wins,
+            stats.shell_hull_profile2d_hermite_quarter_wins,
+            stats.shell_hull_profile2d_hermite_quarter_25_wins,
+            stats.shell_hull_profile2d_hermite_quarter_50_wins,
+            stats.shell_hull_profile2d_hermite_quarter_75_wins,
+            stats.shell_hull_profile2d_hermite_height_wins,
             stats.shell_interval_calls,
             stats.shell_interval_hot_loop_allocations,
             stats.shell_hot_loop_allocations,

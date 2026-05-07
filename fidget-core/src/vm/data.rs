@@ -2,6 +2,7 @@
 use crate::{
     compiler::{RegOp, RegTape, RegisterAllocator, SsaOp, SsaTape},
     context::{BadNode, Context, Node},
+    shell::{ShellIntervalTrace, ShellProfileTopology, ShellTopology},
     var::VarMap,
     vm::Choice,
 };
@@ -123,6 +124,7 @@ impl<const N: usize> VmData<N> {
     pub fn simplify<const M: usize>(
         &self,
         choices: &[Choice],
+        shell_traces: &[Option<ShellIntervalTrace>],
         workspace: &mut VmWorkspace<M>,
         mut tape: VmData<M>,
     ) -> Result<VmData<M>, BadChoiceSlice> {
@@ -139,6 +141,8 @@ impl<const N: usize> VmData<N> {
 
         let mut choice_count = 0;
         let mut output_count = 0;
+
+        let shells = reduced_shells(&self.ssa.shells, shell_traces);
 
         // Other iterators to consume various arrays in order
         let mut choice_iter = choices.iter().rev();
@@ -313,11 +317,11 @@ impl<const N: usize> VmData<N> {
                 tape: ops_out,
                 choice_count,
                 output_count,
-                shells: self.ssa.shells.clone(),
+                shells: shells.clone(),
             },
             asm: {
                 let mut asm_tape = asm_tape;
-                asm_tape.shells = self.ssa.shells.clone();
+                asm_tape.shells = shells;
                 asm_tape
             },
             vars: self.vars.clone(),
@@ -351,6 +355,73 @@ impl<const N: usize> VmData<N> {
             println!("{a:?}");
         }
     }
+}
+
+fn reduced_shells(
+    shells: &[Arc<ShellTopology>],
+    shell_traces: &[Option<ShellIntervalTrace>],
+) -> Vec<Arc<ShellTopology>> {
+    shells
+        .iter()
+        .enumerate()
+        .map(|(index, shell)| {
+            let Some(trace) = shell_traces.get(index).and_then(|trace| *trace)
+            else {
+                return shell.clone();
+            };
+            reduce_shell_topology(shell, trace).unwrap_or_else(|| shell.clone())
+        })
+        .collect()
+}
+
+fn reduce_shell_topology(
+    shell: &Arc<ShellTopology>,
+    trace: ShellIntervalTrace,
+) -> Option<Arc<ShellTopology>> {
+    if !shell_trace_can_reduce(trace) || trace.segment_count != shell.segments.len()
+    {
+        return None;
+    }
+
+    let active_indices: Vec<_> = (0..shell.segments.len())
+        .filter(|index| trace.active_segment_mask & (1_u64 << index) != 0)
+        .collect();
+    if active_indices.is_empty() || active_indices.len() == shell.segments.len() {
+        return None;
+    }
+
+    let mut reduced = (**shell).clone();
+    reduced.segments = active_indices
+        .iter()
+        .map(|&index| shell.segments[index])
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    if let Some(profile) = shell.profile.as_ref() {
+        if profile.segments.len() != shell.segments.len() {
+            return None;
+        }
+        let mut reduced_profile: ShellProfileTopology = profile.clone();
+        reduced_profile.segments = active_indices
+            .iter()
+            .map(|&index| profile.segments[index])
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        reduced.profile = Some(reduced_profile);
+    }
+
+    Some(Arc::new(reduced))
+}
+
+fn shell_trace_can_reduce(trace: ShellIntervalTrace) -> bool {
+    let all_segments = if trace.segment_count >= u64::BITS as usize {
+        u64::MAX
+    } else {
+        (1_u64 << trace.segment_count) - 1
+    };
+    trace.sidecar_reduction_eligible
+        && trace.active_segment_mask != 0
+        && trace.active_segment_mask != all_segments
+        && trace.segment_count > 1
 }
 
 /// Error type for simplification
@@ -440,14 +511,14 @@ mod test {
         let data = VmData::<3>::new(&ctx, &[xyz]).unwrap();
         assert_eq!(data.len(), 6); // 3x input, 2x add, 1x output
         let next = data
-            .simplify::<2>(&[], &mut Default::default(), Default::default())
+            .simplify::<2>(&[], &[], &mut Default::default(), Default::default())
             .unwrap();
         assert_eq!(next.len(), 8); // extra load + store
 
         let data = VmData::<2>::new(&ctx, &[xyz]).unwrap();
         assert_eq!(data.len(), 8);
         let next = data
-            .simplify::<3>(&[], &mut Default::default(), Default::default())
+            .simplify::<3>(&[], &[], &mut Default::default(), Default::default())
             .unwrap();
         assert_eq!(next.len(), 6);
     }

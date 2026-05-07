@@ -11,6 +11,18 @@ use super::{
     },
 };
 
+/// Conservative native shell interval trace data.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ShellIntervalTrace {
+    /// Bitmask of segments that may affect the tile.
+    pub active_segment_mask: u64,
+    /// Total number of shell segments represented by the mask.
+    pub segment_count: usize,
+    /// Whether this trace is currently safe/profitable to use for reduced
+    /// sidecar simplification in render traversal.
+    pub sidecar_reduction_eligible: bool,
+}
+
 /// Evaluates a conservative native shell interval over an axis-aligned tile.
 ///
 /// The first pruning tier uses the topology's global bounds.  If the tile is
@@ -51,6 +63,196 @@ pub fn eval_shell_interval(
     }
 
     Interval::new(f32::NEG_INFINITY, f32::INFINITY)
+}
+
+/// Evaluates a native shell interval and records conservative active segments.
+pub fn eval_shell_interval_with_trace(
+    topology: &ShellTopology,
+    x: Interval,
+    y: Interval,
+    z: Interval,
+) -> (Interval, ShellIntervalTrace) {
+    super::eval::record_shell_interval_call();
+    let mut trace = ShellIntervalTrace {
+        active_segment_mask: all_segments_mask(topology.segments.len()),
+        segment_count: topology.segments.len(),
+        sidecar_reduction_eligible: topology.profile.is_none(),
+    };
+
+    if x.has_nan() || y.has_nan() || z.has_nan() {
+        return (f32::NAN.into(), trace);
+    }
+
+    if let Some(profile) = topology.profile.as_ref() {
+        let profile_trace = profile_active_segment_trace(
+            profile,
+            topology.shell_thickness,
+            x,
+            y,
+            z,
+        );
+        trace = ShellIntervalTrace {
+            active_segment_mask: profile_trace.active_segment_mask,
+            segment_count: topology.segments.len(),
+            sidecar_reduction_eligible: false,
+        };
+        if profile_trace.active_segment_mask == 0 {
+            return (
+                Interval::new(profile_trace.best_gap, f32::INFINITY),
+                trace,
+            );
+        }
+    } else if topology.kind == ShellOpKind::ShellHull
+        && let Some(interval) =
+            eval_shell_hull_positive_interval(topology, x, y, z)
+    {
+        trace.active_segment_mask = 0;
+        return (interval, trace);
+    }
+
+    let segment_trace = active_segment_trace(topology, x, y, z);
+    if topology.profile.is_none() {
+        trace = ShellIntervalTrace {
+            active_segment_mask: segment_trace.active_segment_mask,
+            segment_count: topology.segments.len(),
+            sidecar_reduction_eligible: true,
+        };
+    }
+    if segment_trace.active_segment_mask == 0 {
+        return (Interval::new(segment_trace.best_gap, f32::INFINITY), trace);
+    }
+
+    (Interval::new(f32::NEG_INFINITY, f32::INFINITY), trace)
+}
+
+#[derive(Clone, Copy)]
+struct ActiveSegmentTrace {
+    active_segment_mask: u64,
+    best_gap: f32,
+}
+
+fn all_segments_mask(segment_count: usize) -> u64 {
+    if segment_count >= u64::BITS as usize {
+        u64::MAX
+    } else {
+        (1_u64 << segment_count) - 1
+    }
+}
+
+fn segment_mask(index: usize) -> u64 {
+    if index >= u64::BITS as usize {
+        0
+    } else {
+        1_u64 << index
+    }
+}
+
+fn profile_active_segment_trace(
+    profile: &ShellProfileTopology,
+    _shell_thickness: f32,
+    x: Interval,
+    y: Interval,
+    z: Interval,
+) -> ActiveSegmentTrace {
+    let mut active_segment_mask = 0_u64;
+    let mut best_gap = f32::INFINITY;
+    let padding = 1.0e-4;
+    for (index, segment) in profile.segments.iter().copied().enumerate() {
+        let left = profile.sections[segment.left_section];
+        let right = profile.sections[segment.right_section];
+        let bow_extension = if segment.left_section == 0 {
+            profile.bow_cap_extension
+        } else {
+            0.0
+        };
+        let stern_extension =
+            if segment.right_section + 1 == profile.sections.len() {
+                profile.stern_cap_extension
+            } else {
+                0.0
+            };
+        let min_x = left.station.min(right.station) - bow_extension - padding;
+        let max_x = left.station.max(right.station) + stern_extension + padding;
+        let (keel_min, keel_max) = coeff_range(segment.keel_z, 0.0, 1.0);
+        let (sheer_min, sheer_max) = coeff_range(segment.sheer_z, 0.0, 1.0);
+        let (beam_min, beam_max) = coeff_range(segment.beam, 0.0, 1.0);
+        let half_width = beam_min
+            .abs()
+            .max(beam_max.abs())
+            .max(left.beam.abs())
+            .max(right.beam.abs())
+            * 1.02
+            + padding;
+        let min_z = keel_min.min(sheer_min) - padding;
+        let max_z = keel_max.max(sheer_max) + padding;
+        let half_width =
+            if segment.ship_fast_path && axis_gap(z, min_z, max_z) == 0.0 {
+                half_width.min(
+                    profile_segment_half_width_for_z_interval(
+                        profile, segment, x, z, half_width, padding,
+                    )
+                    .unwrap_or(half_width),
+                )
+            } else {
+                half_width
+            };
+
+        let dx = axis_gap(x, min_x, max_x);
+        let dy = axis_gap(y, -half_width, half_width);
+        let dz = axis_gap(z, min_z, max_z);
+        let gap = dx.mul_add(dx, dy.mul_add(dy, dz * dz)).sqrt();
+        if gap == 0.0 {
+            active_segment_mask |= segment_mask(index);
+        }
+        best_gap = best_gap.min(gap);
+    }
+
+    ActiveSegmentTrace {
+        active_segment_mask,
+        best_gap,
+    }
+}
+
+fn active_segment_trace(
+    topology: &ShellTopology,
+    x: Interval,
+    y: Interval,
+    z: Interval,
+) -> ActiveSegmentTrace {
+    let params = ShellParamsView::empty();
+    let mut active_segment_mask = 0_u64;
+    let mut best_gap = f32::INFINITY;
+    for (index, segment) in topology.segments.iter().copied().enumerate() {
+        let left = topology.sections[segment.left_section];
+        let right = topology.sections[segment.right_section];
+        let left_x = left.station(params);
+        let right_x = right.station(params);
+        let (left_y, left_z) = left.center(params);
+        let (right_y, right_z) = right.center(params);
+        let radius = left.radius(params).max(right.radius(params))
+            + topology.shell_thickness.max(0.0);
+
+        let min_x = left_x.min(right_x);
+        let max_x = left_x.max(right_x);
+        let min_y = left_y.min(right_y) - radius;
+        let max_y = left_y.max(right_y) + radius;
+        let min_z = left_z.min(right_z) - radius;
+        let max_z = left_z.max(right_z) + radius;
+
+        let dx = axis_gap(x, min_x, max_x);
+        let dy = axis_gap(y, min_y, max_y);
+        let dz = axis_gap(z, min_z, max_z);
+        let gap = dx.mul_add(dx, dy.mul_add(dy, dz * dz)).sqrt();
+        if gap == 0.0 {
+            active_segment_mask |= segment_mask(index);
+        }
+        best_gap = best_gap.min(gap);
+    }
+
+    ActiveSegmentTrace {
+        active_segment_mask,
+        best_gap,
+    }
 }
 
 fn outside_profile_segment_gap(
@@ -133,7 +335,7 @@ fn profile_segment_half_width_for_z_interval(
     let left = profile.sections[segment.left_section];
     let right = profile.sections[segment.right_section];
     let (t0, t1) = segment_t_interval(left.station, right.station, x);
-    let node_count = segment.node_count.max(2).min(SHELL_MAX_NODES_PER_CURVE);
+    let node_count = segment.node_count.clamp(2, SHELL_MAX_NODES_PER_CURVE);
     let mut nodes = [ProfileNodeRange {
         max_half_width: 0.0,
         min_z: 0.0,
@@ -185,6 +387,13 @@ fn profile_segment_half_width_for_z_interval(
         }
 
         found_overlap = true;
+        if edge_index == 0 {
+            max_half_width =
+                max_half_width.max(a.max_half_width).max(c.max_half_width);
+
+            continue;
+        }
+
         let local_start = edge_index.saturating_sub(1);
         let local_end = (edge_index + 2).min(active_nodes.len() - 1);
         for node in &active_nodes[local_start..=local_end] {
@@ -472,4 +681,29 @@ mod tests {
             "low keel tile is inside the coarse beam AABB but outside the actual narrow station profile; got {interval:?}",
         );
     }
+
+    #[test]
+    fn profile_shell_interval_uses_tight_monotone_edge_width() {
+        let topology = ShellTopology::ship_profile_shell_hull(
+            [
+                ShellProfileSectionTopology::ship(0.0, -0.5, 0.2, 0.5),
+                ShellProfileSectionTopology::ship(2.0, -0.5, 0.2, 0.5),
+            ],
+            0.10,
+            OpenTopPolicy::Closed,
+        );
+
+        let interval = eval_shell_interval(
+            &topology,
+            Interval::new(0.9, 1.1),
+            Interval::new(0.075, 0.085),
+            Interval::new(-0.50, -0.47),
+        );
+
+        assert!(
+            interval.lower() > 0.0,
+            "monotone lower-profile edge should reject a tile outside the edge width without being widened by the next station node; got {interval:?}",
+        );
+    }
+
 }

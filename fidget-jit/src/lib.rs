@@ -34,7 +34,8 @@ use fidget_core::{
     render::{RenderHints, TileSizes},
     shell::{
         ShellEvalScratch, ShellParamsView, ShellTopology, eval_shell_distance,
-        eval_shell_grad, eval_shell_interval,
+        eval_shell_grad, eval_shell_interval, eval_shell_interval_with_trace,
+        ShellIntervalTrace,
     },
     types::{Grad, Interval},
     var::VarMap,
@@ -45,7 +46,7 @@ use dynasmrt::{
     AssemblyOffset, DynamicLabel, DynasmApi, DynasmError, DynasmLabelApi,
     TargetKind, components::PatchLoc, dynasm,
 };
-use std::sync::Arc;
+use std::{cell::RefCell, sync::Arc};
 
 mod mmap;
 mod permit;
@@ -108,6 +109,25 @@ const CHOICE_LEFT: u32 = Choice::Left as u32;
 const CHOICE_RIGHT: u32 = Choice::Right as u32;
 const CHOICE_BOTH: u32 = Choice::Both as u32;
 
+thread_local! {
+    static JIT_SHELL_INTERVAL_TRACES:
+        RefCell<Vec<(usize, ShellIntervalTrace)>> = RefCell::new(Vec::new());
+}
+
+fn clear_jit_shell_interval_traces() {
+    JIT_SHELL_INTERVAL_TRACES.with(|traces| traces.borrow_mut().clear());
+}
+
+fn drain_jit_shell_interval_traces(
+    mut f: impl FnMut(usize, ShellIntervalTrace),
+) {
+    JIT_SHELL_INTERVAL_TRACES.with(|traces| {
+        for (shell, trace) in traces.borrow_mut().drain(..) {
+            f(shell, trace);
+        }
+    });
+}
+
 pub(crate) extern "C" fn jit_shell_point(
     shell: *const ShellTopology,
     x: f32,
@@ -165,7 +185,16 @@ pub(crate) extern "C" fn jit_shell_interval(
             .as_ref()
             .expect("JIT shell helper received null topology pointer")
     };
-    eval_shell_interval(shell, x, y, z)
+    if shell.profile.is_some() {
+        return eval_shell_interval(shell, x, y, z);
+    }
+    let (interval, trace) = eval_shell_interval_with_trace(shell, x, y, z);
+    JIT_SHELL_INTERVAL_TRACES.with(|traces| {
+        traces
+            .borrow_mut()
+            .push((shell as *const ShellTopology as usize, trace));
+    });
+    interval
 }
 
 pub(crate) extern "C" fn jit_shell_grad_ptr(
@@ -971,6 +1000,7 @@ impl JitFunction {
             mmap: f.into(),
             vars: self.0.data().vars.clone(),
             _shells: self.0.data().shell_topologies().to_vec(),
+            has_shell_distance: !self.0.data().shell_topologies().is_empty(),
             choice_count: self.0.choice_count(),
             output_count: self.0.output_count(),
             fn_trace: unsafe {
@@ -1158,6 +1188,7 @@ pub struct JitTracingFn<T> {
     output_count: usize,
     vars: Arc<VarMap>,
     _shells: Vec<Arc<ShellTopology>>,
+    has_shell_distance: bool,
     fn_trace: JitTracingFnPointer<T>,
 }
 
@@ -1182,17 +1213,21 @@ unsafe impl<T> Send for JitTracingFn<T> {}
 unsafe impl<T> Sync for JitTracingFn<T> {}
 
 impl<T: From<f32> + Clone> JitTracingEval<T> {
-    /// Evaluates a single point, capturing an evaluation trace
-    fn eval(
+    /// Evaluates a single point, capturing trace data into this evaluator.
+    fn eval_and_trace(
         &mut self,
         tape: &JitTracingFn<T>,
         vars: &[T],
-    ) -> (&[T], Option<&VmTrace>) {
+    ) -> bool {
         let mut simplify = 0;
         self.choices.resize(tape.choice_count, Choice::Unknown);
         self.choices.fill(Choice::Unknown);
+        self.choices.resize_shells(tape._shells.len());
         self.out.resize(tape.output_count, f32::NAN.into());
         self.out.fill(f32::NAN.into());
+        if tape.has_shell_distance {
+            clear_jit_shell_interval_traces();
+        }
         unsafe {
             (tape.fn_trace)(
                 vars.as_ptr(),
@@ -1201,10 +1236,29 @@ impl<T: From<f32> + Clone> JitTracingEval<T> {
                 self.out.as_mut_ptr(),
             )
         };
+        if tape.has_shell_distance {
+            drain_jit_shell_interval_traces(|shell_ptr, trace| {
+                if let Some(index) = tape._shells.iter().position(|shell| {
+                    Arc::as_ptr(shell) as usize == shell_ptr
+                }) {
+                    self.choices.record_shell_trace(index as u32, trace);
+                }
+            });
+        }
+        simplify != 0 || self.choices.has_shell_simplification()
+    }
+
+    /// Evaluates a single point, capturing an evaluation trace
+    fn eval(
+        &mut self,
+        tape: &JitTracingFn<T>,
+        vars: &[T],
+    ) -> (&[T], Option<&VmTrace>) {
+        let simplify = self.eval_and_trace(tape, vars);
 
         (
             &self.out,
-            if simplify != 0 {
+            if simplify {
                 Some(&self.choices)
             } else {
                 None
@@ -1468,7 +1522,12 @@ mod test {
     use super::*;
     use fidget_core::{
         context::{Context, Tree},
-        shell::{ShellSectionTopology, ShellTopology},
+        eval::Trace,
+        shell::{
+            OpenTopPolicy, ShellProfileSectionTopology, ShellSectionTopology,
+            ShellTopology, reset_shell_eval_stats, set_shell_eval_stats_enabled,
+            shell_eval_stats,
+        },
         types::{Grad, Interval},
         var::Var,
     };
@@ -1496,6 +1555,32 @@ mod test {
                 ShellSectionTopology::circle(2.0, 0.0, 0.0, 1.0),
             ]
             .into_boxed_slice(),
+        ))
+    }
+
+    fn multi_segment_shell() -> Arc<ShellTopology> {
+        Arc::new(ShellTopology::line_loft_circles(
+            vec![
+                ShellSectionTopology::circle(0.0, 0.0, 0.0, 0.5),
+                ShellSectionTopology::circle(1.0, 0.0, 0.0, 0.5),
+                ShellSectionTopology::circle(2.0, 0.0, 0.0, 0.5),
+                ShellSectionTopology::circle(3.0, 0.0, 0.0, 0.5),
+            ]
+            .into_boxed_slice(),
+        ))
+    }
+
+    fn profile_shell() -> Arc<ShellTopology> {
+        Arc::new(ShellTopology::ship_profile_shell_hull(
+            vec![
+                ShellProfileSectionTopology::ship(0.0, -0.4, 0.7, 0.6),
+                ShellProfileSectionTopology::ship(1.0, -0.4, 0.7, 0.6),
+                ShellProfileSectionTopology::ship(2.0, -0.4, 0.7, 0.6),
+                ShellProfileSectionTopology::ship(3.0, -0.4, 0.7, 0.6),
+            ]
+            .into_boxed_slice(),
+            0.08,
+            OpenTopPolicy::Closed,
         ))
     }
 
@@ -1540,6 +1625,92 @@ mod test {
         assert!(out[0].lower() > 0.0);
         assert_eq!(out[0].upper(), f32::INFINITY);
         assert!(trace.is_none());
+    }
+
+    #[test]
+    fn shell_jit_interval_trace_simplifies_active_segment_sidecar() {
+        let tree = Tree::line_loft_shell(multi_segment_shell());
+        let mut ctx = Context::new();
+        let root = ctx.import(&tree);
+        let shape = JitFunction::new(&ctx, &[root]).unwrap();
+        let tape = shape.interval_tape(Default::default());
+        let mut args = vec![Interval::new(0.0, 0.0); tape.vars().len()];
+        args[tape.vars()[&Var::X]] = Interval::new(1.20, 1.30);
+        args[tape.vars()[&Var::Y]] = Interval::new(-0.10, 0.10);
+        args[tape.vars()[&Var::Z]] = Interval::new(-0.10, 0.10);
+
+        let mut eval = JitFunction::new_interval_eval();
+        let (_out, trace) = eval.eval(&tape, &args).unwrap();
+        let trace = trace.expect("JIT shell active trace should request simplification");
+        assert!(trace.keep_simplified_shape());
+
+        let simplified = shape
+            .simplify(
+                trace,
+                VmData::<REGISTER_LIMIT>::default(),
+                &mut Default::default(),
+            )
+            .unwrap();
+        let shell = simplified
+            .0
+            .data()
+            .shell_topology(0)
+            .expect("simplified shell sidecar should exist");
+        assert_eq!(shell.segments.len(), 1);
+        assert_eq!(shell.segments[0].left_section, 1);
+        assert_eq!(shell.segments[0].right_section, 2);
+    }
+
+    #[test]
+    fn shell_jit_interval_trace_collects_without_second_interval_eval() {
+        let tree = Tree::line_loft_shell(multi_segment_shell());
+        let mut ctx = Context::new();
+        let root = ctx.import(&tree);
+        let shape = JitFunction::new(&ctx, &[root]).unwrap();
+        let tape = shape.interval_tape(Default::default());
+        let mut args = vec![Interval::new(0.0, 0.0); tape.vars().len()];
+        args[tape.vars()[&Var::X]] = Interval::new(1.20, 1.30);
+        args[tape.vars()[&Var::Y]] = Interval::new(-0.10, 0.10);
+        args[tape.vars()[&Var::Z]] = Interval::new(-0.10, 0.10);
+
+        set_shell_eval_stats_enabled(true);
+        reset_shell_eval_stats();
+        let mut eval = JitFunction::new_interval_eval();
+        let (_out, trace) = eval.eval(&tape, &args).unwrap();
+        let stats = shell_eval_stats();
+        set_shell_eval_stats_enabled(false);
+
+        assert!(trace.is_some());
+        assert_eq!(
+            stats.interval_calls, 1,
+            "JIT shell interval trace should come from the JIT helper, not a second VM interval pass"
+        );
+    }
+
+    #[test]
+    fn profile_shell_jit_interval_does_not_emit_sidecar_trace() {
+        let tree = Tree::shell_hull(profile_shell());
+        let mut ctx = Context::new();
+        let root = ctx.import(&tree);
+        let shape = JitFunction::new(&ctx, &[root]).unwrap();
+        let tape = shape.interval_tape(Default::default());
+        let mut args = vec![Interval::new(0.0, 0.0); tape.vars().len()];
+        args[tape.vars()[&Var::X]] = Interval::new(1.20, 1.30);
+        args[tape.vars()[&Var::Y]] = Interval::new(-0.10, 0.10);
+        args[tape.vars()[&Var::Z]] = Interval::new(0.00, 0.10);
+
+        set_shell_eval_stats_enabled(true);
+        reset_shell_eval_stats();
+        let mut eval = JitFunction::new_interval_eval();
+        let (_out, trace) = eval.eval(&tape, &args).unwrap();
+        let stats = shell_eval_stats();
+        set_shell_eval_stats_enabled(false);
+
+        assert!(trace.is_none());
+        assert_eq!(
+            stats.interval_calls, 1,
+            "profile shell JIT interval eval should use the fast non-tracing interval helper"
+        );
     }
 
     #[test]

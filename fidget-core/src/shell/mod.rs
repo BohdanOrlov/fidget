@@ -16,7 +16,9 @@ pub use eval::{
     eval_shell_grad, reset_shell_eval_stats, set_shell_eval_stats_enabled,
     shell_eval_stats,
 };
-pub use interval::eval_shell_interval;
+pub use interval::{
+    ShellIntervalTrace, eval_shell_interval, eval_shell_interval_with_trace,
+};
 pub use params::{ShellParamLayout, ShellParamsView};
 pub use topology::{
     OpenTopPolicy, SHELL_MAX_CANDIDATES, SHELL_MAX_CURVES,

@@ -10,8 +10,8 @@ use crate::{
     render::{RenderHints, TileSizes},
     shape::Shape,
     shell::{
-        ShellEvalScratch, ShellTopology, eval_shell_distance,
-        eval_shell_interval,
+        ShellEvalScratch, ShellIntervalTrace, ShellTopology,
+        eval_shell_distance, eval_shell_interval, eval_shell_interval_with_trace,
     },
     types::{Grad, Interval},
     var::VarMap,
@@ -74,52 +74,98 @@ impl<const N: usize> Tape for GenericVmTape<N> {
 
 /// A trace captured by a VM evaluation
 ///
-/// This is a thin wrapper around a [`Vec<Choice>`](Choice).
+/// This stores regular min/max choices plus native shell trace payloads.
 #[derive(Clone, Default, Eq, PartialEq)]
-pub struct VmTrace(Vec<Choice>);
+pub struct VmTrace {
+    choices: Vec<Choice>,
+    shell_traces: Vec<Option<ShellIntervalTrace>>,
+}
 
 impl VmTrace {
     /// Fills the trace with the given value
     pub fn fill(&mut self, v: Choice) {
-        self.0.fill(v);
+        self.choices.fill(v);
     }
     /// Resizes the trace, using the new value if it needs to be extended
     pub fn resize(&mut self, n: usize, v: Choice) {
-        self.0.resize(n, v);
+        self.choices.resize(n, v);
+    }
+    /// Resizes the shell trace sidecar table and clears previous payloads.
+    pub fn resize_shells(&mut self, n: usize) {
+        self.shell_traces.clear();
+        self.shell_traces.resize(n, None);
+    }
+    /// Records a shell interval trace for a topology sidecar.
+    pub fn record_shell_trace(&mut self, shell: u32, trace: ShellIntervalTrace) {
+        if let Some(slot) = self.shell_traces.get_mut(shell as usize) {
+            *slot = Some(trace);
+        }
+    }
+    /// Returns true if any shell trace can narrow a sidecar.
+    pub fn has_shell_simplification(&self) -> bool {
+        self.shell_traces
+            .iter()
+            .flatten()
+            .any(shell_trace_can_simplify)
+    }
+    /// Returns shell trace payloads indexed by shell sidecar.
+    pub fn shell_traces(&self) -> &[Option<ShellIntervalTrace>] {
+        &self.shell_traces
     }
     /// Returns the inner choice slice
     pub fn as_slice(&self) -> &[Choice] {
-        self.0.as_slice()
+        self.choices.as_slice()
     }
     /// Returns the inner choice slice as a mutable reference
     pub fn as_mut_slice(&mut self) -> &mut [Choice] {
-        self.0.as_mut_slice()
+        self.choices.as_mut_slice()
     }
     /// Returns a pointer to the allocated choice array
     pub fn as_mut_ptr(&mut self) -> *mut Choice {
-        self.0.as_mut_ptr()
+        self.choices.as_mut_ptr()
     }
 }
 
 impl Trace for VmTrace {
     fn copy_from(&mut self, other: &VmTrace) {
-        self.0.resize(other.0.len(), Choice::Unknown);
-        self.0.copy_from_slice(&other.0);
+        self.choices.resize(other.choices.len(), Choice::Unknown);
+        self.choices.copy_from_slice(&other.choices);
+        self.shell_traces.clear();
+        self.shell_traces.extend_from_slice(&other.shell_traces);
+    }
+
+    fn keep_simplified_shape(&self) -> bool {
+        self.has_shell_simplification()
     }
 }
 
 #[cfg(any(test, feature = "eval-tests"))]
 impl From<Vec<Choice>> for VmTrace {
     fn from(v: Vec<Choice>) -> Self {
-        Self(v)
+        Self {
+            choices: v,
+            shell_traces: Vec::new(),
+        }
     }
 }
 
 #[cfg(any(test, feature = "eval-tests"))]
 impl AsRef<[Choice]> for VmTrace {
     fn as_ref(&self) -> &[Choice] {
-        &self.0
+        &self.choices
     }
+}
+
+fn shell_trace_can_simplify(trace: &ShellIntervalTrace) -> bool {
+    let all_segments = if trace.segment_count >= u64::BITS as usize {
+        u64::MAX
+    } else {
+        (1_u64 << trace.segment_count) - 1
+    };
+    trace.sidecar_reduction_eligible
+        && trace.active_segment_mask != 0
+        && trace.active_segment_mask != all_segments
+        && trace.segment_count > 1
 }
 
 /// VM-backed shape with a configurable number of registers
@@ -173,7 +219,12 @@ impl<const N: usize> GenericVmFunction<N> {
         storage: VmData<M>,
         workspace: &mut VmWorkspace<M>,
     ) -> Result<GenericVmFunction<M>, BadTrace> {
-        let d = self.0.simplify::<M>(trace.as_slice(), workspace, storage)?;
+        let d = self.0.simplify::<M>(
+            trace.as_slice(),
+            trace.shell_traces(),
+            workspace,
+            storage,
+        )?;
         Ok(GenericVmFunction(Arc::new(d)))
     }
 }
@@ -333,6 +384,7 @@ impl<T: From<f32> + Clone> TracingVmEval<T> {
     fn resize_slots<const N: usize>(&mut self, tape: &VmData<N>) {
         self.slots.resize(tape.slot_count(), f32::NAN.into());
         self.choices.resize(tape.choice_count(), Choice::Unknown);
+        self.choices.resize_shells(tape.shell_topologies().len());
         self.out.resize(tape.output_count(), f32::NAN.into());
         self.choices.fill(Choice::Unknown);
     }
@@ -359,7 +411,9 @@ impl<const N: usize> TracingEvaluator for VmIntervalEval<N> {
 
         let mut simplify = false;
         let mut v = SlotArray(&mut self.0.slots);
-        let mut choices = self.0.choices.as_mut_slice().iter_mut();
+        let trace = &mut self.0.choices;
+        let shell_traces = &mut trace.shell_traces;
+        let mut choices = trace.choices.as_mut_slice().iter_mut();
         for op in tape.iter_asm() {
             match op {
                 RegOp::Output(arg, i) => {
@@ -427,10 +481,21 @@ impl<const N: usize> TracingEvaluator for VmIntervalEval<N> {
                 }
                 RegOp::CopyReg(out, arg) => v[out] = v[arg],
                 RegOp::ShellDistance(out, shell, x, y, z) => {
-                    let shell = tape.shell_topology(shell).expect(
+                    let shell_index = shell;
+                    let shell = tape.shell_topology(shell_index).expect(
                         "shell sidecar should exist during interval eval",
                     );
-                    v[out] = eval_shell_interval(shell, v[x], v[y], v[z]);
+                    if shell.profile.is_some() {
+                        v[out] = eval_shell_interval(shell, v[x], v[y], v[z]);
+                        continue;
+                    }
+                    let (interval, shell_trace) =
+                        eval_shell_interval_with_trace(shell, v[x], v[y], v[z]);
+                    v[out] = interval;
+                    if let Some(slot) = shell_traces.get_mut(shell_index as usize) {
+                        *slot = Some(shell_trace);
+                    }
+                    simplify |= shell_trace_can_simplify(&shell_trace);
                 }
                 RegOp::AddRegImm(out, arg, imm) => {
                     v[out] = v[arg] + imm.into();

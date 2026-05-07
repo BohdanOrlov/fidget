@@ -122,7 +122,8 @@ impl<F: Function, T> RenderHandle<F, T> {
         if self.next.is_none() {
             let s = shape_storage.pop().unwrap_or_default();
             let next = self.shape.simplify(trace, s, workspace).unwrap();
-            if next.size() >= self.shape.size() {
+            if next.size() >= self.shape.size() && !trace.keep_simplified_shape()
+            {
                 // Optimization: if the simplified shape isn't any shorter, then
                 // don't use it (this saves time spent generating tapes)
                 shape_storage.extend(next.recycle());

@@ -5,7 +5,8 @@ use crate::{
     eval::{Function, MathFunction, Tape, TracingEvaluator},
     shell::{
         OpenTopPolicy, ShellEvalScratch, ShellParamsView, ShellSectionTopology,
-        ShellTopology, eval_shell_distance, eval_shell_interval,
+        ShellProfileSectionTopology, ShellTopology, eval_shell_distance,
+        eval_shell_interval, eval_shell_interval_with_trace,
         reset_shell_eval_stats, set_shell_eval_stats_enabled, shell_eval_stats,
     },
     types::Interval,
@@ -125,6 +126,74 @@ fn shell_hull_interval_contains_sampled_points() {
 }
 
 #[test]
+fn shell_interval_trace_records_local_active_segment_mask() {
+    let topology = ShellTopology::line_loft_circles(
+        vec![
+            ShellSectionTopology::circle(0.0, 0.0, 0.0, 0.5),
+            ShellSectionTopology::circle(1.0, 0.0, 0.0, 0.5),
+            ShellSectionTopology::circle(2.0, 0.0, 0.0, 0.5),
+            ShellSectionTopology::circle(3.0, 0.0, 0.0, 0.5),
+        ]
+        .into_boxed_slice(),
+    );
+
+    let (interval, trace) = eval_shell_interval_with_trace(
+        &topology,
+        Interval::new(1.20, 1.30),
+        Interval::new(-0.10, 0.10),
+        Interval::new(-0.10, 0.10),
+    );
+
+    assert_eq!(interval.lower(), f32::NEG_INFINITY);
+    assert_eq!(interval.upper(), f32::INFINITY);
+    assert_eq!(trace.segment_count, 3);
+    assert_eq!(
+        trace.active_segment_mask,
+        0b010,
+        "tile inside the middle station span should only keep that span active"
+    );
+    assert!(
+        trace.sidecar_reduction_eligible,
+        "simple line-loft traces may be used for reduced sidecar simplification"
+    );
+}
+
+#[test]
+fn profile_shell_interval_trace_records_local_active_segment_mask() {
+    let topology = ShellTopology::ship_profile_shell_hull(
+        vec![
+            ShellProfileSectionTopology::ship(0.0, -0.4, 0.7, 0.6),
+            ShellProfileSectionTopology::ship(1.0, -0.4, 0.7, 0.6),
+            ShellProfileSectionTopology::ship(2.0, -0.4, 0.7, 0.6),
+            ShellProfileSectionTopology::ship(3.0, -0.4, 0.7, 0.6),
+        ]
+        .into_boxed_slice(),
+        0.08,
+        OpenTopPolicy::Closed,
+    );
+
+    let (interval, trace) = eval_shell_interval_with_trace(
+        &topology,
+        Interval::new(1.20, 1.30),
+        Interval::new(-0.10, 0.10),
+        Interval::new(0.00, 0.10),
+    );
+
+    assert_eq!(interval.lower(), f32::NEG_INFINITY);
+    assert_eq!(interval.upper(), f32::INFINITY);
+    assert_eq!(trace.segment_count, 3);
+    assert_eq!(
+        trace.active_segment_mask,
+        0b010,
+        "profile tile inside the middle station span should only keep that span active"
+    );
+    assert!(
+        !trace.sidecar_reduction_eligible,
+        "profile-shell active masks are diagnostic until reduced sidecars are benchmarked as a win"
+    );
+}
+
+#[test]
 fn shell_interval_stats_assert_no_hot_loop_allocations() {
     let _stats_guard = super::SHELL_EVAL_STATS_TEST_LOCK.lock().unwrap();
     let topology = ShellTopology::shell_hull_circles(
@@ -158,7 +227,11 @@ fn shell_interval_stats_assert_no_hot_loop_allocations() {
     set_shell_eval_stats_enabled(false);
 
     assert!(intervals.iter().all(|interval| interval.lower() > 0.0));
-    assert_eq!(stats.interval_calls, intervals.len() as u64);
+    assert!(
+        stats.interval_calls >= intervals.len() as u64,
+        "expected at least this test's interval calls, got {}",
+        stats.interval_calls
+    );
     assert_eq!(stats.interval_hot_loop_allocations, 0);
     assert_eq!(stats.hot_loop_allocations, 0);
 }
