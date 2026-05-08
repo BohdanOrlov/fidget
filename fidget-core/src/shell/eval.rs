@@ -737,6 +737,195 @@ pub fn eval_shell_distance(
     }
 }
 
+/// Evaluates four native shell distances as one packet.
+///
+/// The profile-shell fast path keeps the same scalar distance contract, but
+/// shares the station segment lookup and profile node sampling layout across
+/// lanes.  Unsupported packets fall back to the scalar evaluator lane-by-lane.
+#[inline(always)]
+pub fn eval_shell_distance4(
+    topology: &ShellTopology,
+    xs: [f32; 4],
+    ys: [f32; 4],
+    zs: [f32; 4],
+) -> [f32; 4] {
+    if topology.kind == ShellOpKind::ShellHull
+        && let Some(profile) = topology.profile.as_ref()
+        && let Some(segment_index) =
+            shared_profile_packet_segment_index(topology, xs)
+    {
+        return eval_profile_shell_hull_packet4(
+            topology,
+            profile,
+            segment_index,
+            xs,
+            ys,
+            zs,
+        );
+    }
+
+    let mut scratch = ShellEvalScratch::default();
+    [
+        eval_shell_distance(
+            topology,
+            ShellParamsView::empty(),
+            &mut scratch,
+            xs[0],
+            ys[0],
+            zs[0],
+        )
+        .distance,
+        eval_shell_distance(
+            topology,
+            ShellParamsView::empty(),
+            &mut scratch,
+            xs[1],
+            ys[1],
+            zs[1],
+        )
+        .distance,
+        eval_shell_distance(
+            topology,
+            ShellParamsView::empty(),
+            &mut scratch,
+            xs[2],
+            ys[2],
+            zs[2],
+        )
+        .distance,
+        eval_shell_distance(
+            topology,
+            ShellParamsView::empty(),
+            &mut scratch,
+            xs[3],
+            ys[3],
+            zs[3],
+        )
+        .distance,
+    ]
+}
+
+#[inline(always)]
+fn shared_profile_packet_segment_index(
+    topology: &ShellTopology,
+    xs: [f32; 4],
+) -> Option<usize> {
+    if topology.segments.len() <= 3 {
+        return None;
+    }
+
+    let first =
+        monotonic_station_segment(topology, ShellParamsView::empty(), xs[0])?;
+    for x in xs.into_iter().skip(1) {
+        if monotonic_station_segment(topology, ShellParamsView::empty(), x)?
+            != first
+        {
+            return None;
+        }
+    }
+    Some(first)
+}
+
+#[inline(always)]
+fn eval_profile_shell_hull_packet4(
+    topology: &ShellTopology,
+    profile: &ShellProfileTopology,
+    segment_index: usize,
+    xs: [f32; 4],
+    ys: [f32; 4],
+    zs: [f32; 4],
+) -> [f32; 4] {
+    let segment =
+        profile.segments[segment_index.min(profile.segments.len() - 1)];
+    let outer = eval_profile_solid_outer_packet4(
+        profile,
+        segment,
+        xs,
+        ys,
+        zs,
+        Profile2dCallSource::Distance,
+    );
+    let thickness = topology.shell_thickness.max(0.0);
+    let mut out = outer;
+
+    if thickness > 1.0e-6 {
+        let mut needs_inner = [false; 4];
+        let mut inner_count = 0usize;
+        for i in 0..4 {
+            needs_inner[i] = outer[i] <= 0.0;
+            inner_count += usize::from(needs_inner[i]);
+        }
+        if inner_count == 4 {
+            let inner = eval_profile_solid_packet4(
+                profile,
+                segment,
+                thickness,
+                xs,
+                ys,
+                zs,
+                Profile2dCallSource::Distance,
+            );
+            for i in 0..4 {
+                if needs_inner[i] {
+                    out[i] = outer[i].max(-inner[i]);
+                }
+            }
+        } else if inner_count > 0 {
+            for i in 0..4 {
+                if needs_inner[i] {
+                    let inner = eval_profile_solid(
+                        profile,
+                        segment,
+                        thickness,
+                        xs[i],
+                        ys[i],
+                        zs[i],
+                        Profile2dCallSource::Distance,
+                        Profile2dShellSide::Inner,
+                    );
+                    out[i] = outer[i].max(-inner);
+                }
+            }
+        }
+    }
+
+    for i in 0..4 {
+        out[i] = apply_open_top_distance(
+            topology.open_top,
+            xs[i],
+            ys[i],
+            zs[i],
+            out[i],
+        );
+    }
+    out
+}
+
+#[inline(always)]
+fn apply_open_top_distance(
+    open_top: OpenTopPolicy,
+    x: f32,
+    y: f32,
+    z: f32,
+    distance: f32,
+) -> f32 {
+    if let OpenTopPolicy::BoxCut {
+        cut_z,
+        half_length,
+        half_width,
+        offset_x,
+    } = open_top
+    {
+        let x_window = (x - offset_x).abs() - half_length;
+        let y_window = y.abs() - half_width;
+        let z_cut = cut_z - z;
+        let opening = z_cut.max(x_window).max(y_window);
+        distance.max(-opening)
+    } else {
+        distance
+    }
+}
+
 fn eval_solid_loft(
     topology: &ShellTopology,
     params: ShellParamsView<'_>,
@@ -998,6 +1187,77 @@ fn eval_profile_solid(
 }
 
 #[inline(always)]
+fn eval_profile_solid_outer_packet4(
+    profile: &ShellProfileTopology,
+    segment: ShellProfileSegmentTopology,
+    xs: [f32; 4],
+    ys: [f32; 4],
+    zs: [f32; 4],
+    source: Profile2dCallSource,
+) -> [f32; 4] {
+    let left = profile.sections[segment.left_section];
+    let right = profile.sections[segment.right_section];
+    let span = right.station - left.station;
+    let ts = profile_packet_ts(left.station, span, xs);
+    let section = eval_profile_section_sdf_outer_packet4(
+        profile, segment, ts, ys, zs, source,
+    );
+    let first = profile.sections[0].station;
+    let last = profile.sections[profile.sections.len() - 1].station;
+    let mut out = [0.0; 4];
+    for i in 0..4 {
+        let left_cap = (first - profile.bow_cap_extension) - xs[i];
+        let right_cap = xs[i] - (last + profile.stern_cap_extension);
+        out[i] = section[i].max(left_cap.max(right_cap));
+    }
+    out
+}
+
+#[inline(always)]
+fn eval_profile_solid_packet4(
+    profile: &ShellProfileTopology,
+    segment: ShellProfileSegmentTopology,
+    inset: f32,
+    xs: [f32; 4],
+    ys: [f32; 4],
+    zs: [f32; 4],
+    source: Profile2dCallSource,
+) -> [f32; 4] {
+    let left = profile.sections[segment.left_section];
+    let right = profile.sections[segment.right_section];
+    let span = right.station - left.station;
+    let ts = profile_packet_ts(left.station, span, xs);
+    let section = eval_profile_section_sdf_packet4(
+        profile, segment, ts, inset, ys, zs, source,
+    );
+    let first = profile.sections[0].station;
+    let last = profile.sections[profile.sections.len() - 1].station;
+    let cap_inset = inset.max(0.0) * profile.cap_inset_scale;
+    let mut out = [0.0; 4];
+    for i in 0..4 {
+        let left_cap = (first - profile.bow_cap_extension + cap_inset) - xs[i];
+        let right_cap =
+            xs[i] - (last + profile.stern_cap_extension - cap_inset);
+        out[i] = section[i].max(left_cap.max(right_cap));
+    }
+    out
+}
+
+#[inline(always)]
+fn profile_packet_ts(left_station: f32, span: f32, xs: [f32; 4]) -> [f32; 4] {
+    if span.abs() <= 1.0e-6 {
+        [0.0; 4]
+    } else {
+        [
+            ((xs[0] - left_station) / span).clamp(0.0, 1.0),
+            ((xs[1] - left_station) / span).clamp(0.0, 1.0),
+            ((xs[2] - left_station) / span).clamp(0.0, 1.0),
+            ((xs[3] - left_station) / span).clamp(0.0, 1.0),
+        ]
+    }
+}
+
+#[inline(always)]
 fn eval_profile_solid_gradient(
     profile: &ShellProfileTopology,
     segment: ShellProfileSegmentTopology,
@@ -1121,6 +1381,75 @@ fn eval_profile_section_sdf(
     );
     let distance = section.distance_sq.sqrt();
     if section.inside { -distance } else { distance }
+}
+
+#[inline(always)]
+fn eval_profile_section_sdf_outer_packet4(
+    profile: &ShellProfileTopology,
+    segment: ShellProfileSegmentTopology,
+    ts: [f32; 4],
+    ys: [f32; 4],
+    zs: [f32; 4],
+    source: Profile2dCallSource,
+) -> [f32; 4] {
+    for _ in 0..4 {
+        record_profile2d_call(source, Profile2dShellSide::Outer);
+    }
+
+    let empty = ProfileNodeSample {
+        half_width: 0.0,
+        z: 0.0,
+        continuity: ShellProfileNodeContinuity::Linear,
+    };
+    let mut nodes = [[empty; SHELL_MAX_NODES_PER_CURVE]; 4];
+    let sampled =
+        sample_profile_nodes_outer_packet4(profile, segment, ts, &mut nodes);
+    profile_section_distance_packet4(ys, zs, &nodes, sampled)
+}
+
+#[inline(always)]
+fn eval_profile_section_sdf_packet4(
+    profile: &ShellProfileTopology,
+    segment: ShellProfileSegmentTopology,
+    ts: [f32; 4],
+    inset: f32,
+    ys: [f32; 4],
+    zs: [f32; 4],
+    source: Profile2dCallSource,
+) -> [f32; 4] {
+    for _ in 0..4 {
+        record_profile2d_call(source, Profile2dShellSide::Inner);
+    }
+
+    let empty = ProfileNodeSample {
+        half_width: 0.0,
+        z: 0.0,
+        continuity: ShellProfileNodeContinuity::Linear,
+    };
+    let mut nodes = [[empty; SHELL_MAX_NODES_PER_CURVE]; 4];
+    let sampled =
+        sample_profile_nodes_packet4(profile, segment, ts, inset, &mut nodes);
+    profile_section_distance_packet4(ys, zs, &nodes, sampled)
+}
+
+#[inline(always)]
+fn profile_section_distance_packet4(
+    ys: [f32; 4],
+    zs: [f32; 4],
+    nodes: &[[ProfileNodeSample; SHELL_MAX_NODES_PER_CURVE]; 4],
+    sampled: [ProfileNodeSampleSet; 4],
+) -> [f32; 4] {
+    let mut out = [0.0; 4];
+    for i in 0..4 {
+        let section = profile_section_distance(
+            [ys[i].abs(), zs[i]],
+            &nodes[i][..sampled[i].node_count],
+            sampled[i].monotonic_in_z,
+        );
+        let distance = section.distance_sq.sqrt();
+        out[i] = if section.inside { -distance } else { distance };
+    }
+    out
 }
 
 #[inline(always)]
@@ -1342,6 +1671,210 @@ fn sample_profile_nodes(
         node_count,
         monotonic_in_z,
     }
+}
+
+#[inline(always)]
+fn sample_profile_nodes_outer_packet4(
+    profile: &ShellProfileTopology,
+    segment: ShellProfileSegmentTopology,
+    ts: [f32; 4],
+    out: &mut [[ProfileNodeSample; SHELL_MAX_NODES_PER_CURVE]; 4],
+) -> [ProfileNodeSampleSet; 4] {
+    let left = profile.sections[segment.left_section];
+    let right = profile.sections[segment.right_section];
+    let node_count = segment.node_count.max(2).min(SHELL_MAX_NODES_PER_CURVE);
+    let mut nondecreasing = [true; 4];
+    let mut nonincreasing = [true; 4];
+    let mut previous_z = [0.0_f32; 4];
+
+    for node_index in 0..node_count {
+        let left_node = left.nodes[node_index.min(left.node_count - 1)];
+        let right_node = right.nodes[node_index.min(right.node_count - 1)];
+        let continuity = if left_node.continuity
+            == ShellProfileNodeContinuity::Linear
+            || right_node.continuity == ShellProfileNodeContinuity::Linear
+        {
+            ShellProfileNodeContinuity::Linear
+        } else {
+            ShellProfileNodeContinuity::Smooth
+        };
+
+        for lane in 0..4 {
+            let (half_width, z) = match segment.interpolation {
+                ShellProfileSpanInterpolation::Linear => (
+                    lerp(left_node.half_width, right_node.half_width, ts[lane]),
+                    lerp(left_node.z, right_node.z, ts[lane]),
+                ),
+                ShellProfileSpanInterpolation::SmoothCatmullRom => {
+                    let node = segment.nodes[node_index];
+                    (node.half_width.eval(ts[lane]), node.z.eval(ts[lane]))
+                }
+            };
+
+            out[lane][node_index] = ProfileNodeSample {
+                half_width: half_width.abs().max(0.0),
+                z,
+                continuity,
+            };
+            if node_index > 0 {
+                if z < previous_z[lane] {
+                    nondecreasing[lane] = false;
+                }
+                if z > previous_z[lane] {
+                    nonincreasing[lane] = false;
+                }
+            }
+            previous_z[lane] = z;
+        }
+    }
+
+    [
+        ProfileNodeSampleSet {
+            node_count,
+            monotonic_in_z: nondecreasing[0] || nonincreasing[0],
+        },
+        ProfileNodeSampleSet {
+            node_count,
+            monotonic_in_z: nondecreasing[1] || nonincreasing[1],
+        },
+        ProfileNodeSampleSet {
+            node_count,
+            monotonic_in_z: nondecreasing[2] || nonincreasing[2],
+        },
+        ProfileNodeSampleSet {
+            node_count,
+            monotonic_in_z: nondecreasing[3] || nonincreasing[3],
+        },
+    ]
+}
+
+#[inline(always)]
+fn sample_profile_nodes_packet4(
+    profile: &ShellProfileTopology,
+    segment: ShellProfileSegmentTopology,
+    ts: [f32; 4],
+    inset: f32,
+    out: &mut [[ProfileNodeSample; SHELL_MAX_NODES_PER_CURVE]; 4],
+) -> [ProfileNodeSampleSet; 4] {
+    let left = profile.sections[segment.left_section];
+    let right = profile.sections[segment.right_section];
+    let node_count = segment.node_count.max(2).min(SHELL_MAX_NODES_PER_CURVE);
+    let inset = inset.max(0.0);
+    let mut max_half_width = [0.0_f32; 4];
+    let mut nondecreasing = [true; 4];
+    let mut nonincreasing = [true; 4];
+    let mut previous_z = [0.0_f32; 4];
+
+    for node_index in 0..node_count {
+        let left_node = left.nodes[node_index.min(left.node_count - 1)];
+        let right_node = right.nodes[node_index.min(right.node_count - 1)];
+        let continuity = if left_node.continuity
+            == ShellProfileNodeContinuity::Linear
+            || right_node.continuity == ShellProfileNodeContinuity::Linear
+        {
+            ShellProfileNodeContinuity::Linear
+        } else {
+            ShellProfileNodeContinuity::Smooth
+        };
+
+        for lane in 0..4 {
+            let (half_width, z) = match segment.interpolation {
+                ShellProfileSpanInterpolation::Linear => (
+                    lerp(left_node.half_width, right_node.half_width, ts[lane]),
+                    lerp(left_node.z, right_node.z, ts[lane]),
+                ),
+                ShellProfileSpanInterpolation::SmoothCatmullRom => {
+                    let node = segment.nodes[node_index];
+                    (node.half_width.eval(ts[lane]), node.z.eval(ts[lane]))
+                }
+            };
+
+            let half_width = half_width.abs().max(0.0);
+            max_half_width[lane] = max_half_width[lane].max(half_width);
+            out[lane][node_index] = ProfileNodeSample {
+                half_width,
+                z,
+                continuity,
+            };
+            if node_index > 0 {
+                if z < previous_z[lane] {
+                    nondecreasing[lane] = false;
+                }
+                if z > previous_z[lane] {
+                    nonincreasing[lane] = false;
+                }
+            }
+            previous_z[lane] = z;
+        }
+    }
+    let mut monotonic_in_z = [
+        nondecreasing[0] || nonincreasing[0],
+        nondecreasing[1] || nonincreasing[1],
+        nondecreasing[2] || nonincreasing[2],
+        nondecreasing[3] || nonincreasing[3],
+    ];
+
+    if inset > 0.0 {
+        nondecreasing = [true; 4];
+        nonincreasing = [true; 4];
+        previous_z = [0.0; 4];
+        let mut width_scale = [0.0; 4];
+        for lane in 0..4 {
+            let width_floor = max_half_width[lane].min(0.012);
+            width_scale[lane] = if max_half_width[lane] <= 1.0e-6 {
+                0.0
+            } else {
+                (max_half_width[lane] - inset * 0.96).max(width_floor)
+                    / max_half_width[lane]
+            };
+        }
+
+        for node_index in 0..node_count {
+            for lane in 0..4 {
+                let node = &mut out[lane][node_index];
+                node.half_width *= width_scale[lane];
+                if node_index == 0 {
+                    node.z += inset * 0.92;
+                } else if node_index + 1 == node_count {
+                    node.z -= inset * 0.92;
+                }
+                if node_index > 0 {
+                    if node.z < previous_z[lane] {
+                        nondecreasing[lane] = false;
+                    }
+                    if node.z > previous_z[lane] {
+                        nonincreasing[lane] = false;
+                    }
+                }
+                previous_z[lane] = node.z;
+            }
+        }
+        monotonic_in_z = [
+            nondecreasing[0] || nonincreasing[0],
+            nondecreasing[1] || nonincreasing[1],
+            nondecreasing[2] || nonincreasing[2],
+            nondecreasing[3] || nonincreasing[3],
+        ];
+    }
+
+    [
+        ProfileNodeSampleSet {
+            node_count,
+            monotonic_in_z: monotonic_in_z[0],
+        },
+        ProfileNodeSampleSet {
+            node_count,
+            monotonic_in_z: monotonic_in_z[1],
+        },
+        ProfileNodeSampleSet {
+            node_count,
+            monotonic_in_z: monotonic_in_z[2],
+        },
+        ProfileNodeSampleSet {
+            node_count,
+            monotonic_in_z: monotonic_in_z[3],
+        },
+    ]
 }
 
 #[inline(always)]
@@ -3224,6 +3757,45 @@ mod tests {
         assert!(sample.distance.is_finite());
         assert_eq!(batch_calls, stats.profile2d_outer_distance_calls);
         assert_eq!(batch_calls, 1);
+    }
+
+    #[test]
+    fn profile_shell_distance4_matches_scalar_same_segment() {
+        let topology = ShellTopology::ship_profile_shell_hull(
+            [
+                test_profile_section(0.0),
+                test_profile_section(1.0),
+                test_profile_section(2.0),
+                test_profile_section(3.0),
+                test_profile_section(4.0),
+            ],
+            0.08,
+            OpenTopPolicy::Closed,
+        );
+        let xs = [1.10, 1.25, 1.50, 1.85];
+        let ys = [0.18, -0.32, 0.44, -0.58];
+        let zs = [-0.18, 0.02, 0.26, 0.62];
+        assert_eq!(shared_profile_packet_segment_index(&topology, xs), Some(1));
+
+        let packet = eval_shell_distance4(&topology, xs, ys, zs);
+        let mut scratch = ShellEvalScratch::default();
+        for i in 0..4 {
+            let scalar = eval_shell_distance(
+                &topology,
+                ShellParamsView::empty(),
+                &mut scratch,
+                xs[i],
+                ys[i],
+                zs[i],
+            )
+            .distance;
+            assert!(
+                (packet[i] - scalar).abs() <= 1.0e-6,
+                "packet lane {i} changed profile-shell distance: packet={} scalar={}",
+                packet[i],
+                scalar,
+            );
+        }
     }
 
     fn test_profile_section(station: f32) -> ShellProfileSectionTopology {

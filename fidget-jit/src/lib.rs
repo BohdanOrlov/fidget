@@ -34,8 +34,8 @@ use fidget_core::{
     render::{NativeRenderMetadata, RenderHints, TileSizes},
     shell::{
         ShellEvalScratch, ShellIntervalTrace, ShellParamsView, ShellTopology,
-        eval_shell_distance, eval_shell_grad, eval_shell_interval,
-        eval_shell_interval_with_trace,
+        eval_shell_distance, eval_shell_distance4, eval_shell_grad,
+        eval_shell_interval, eval_shell_interval_with_trace,
     },
     types::{Grad, Interval},
     var::VarMap,
@@ -156,20 +156,11 @@ pub(crate) extern "C" fn jit_shell_float4(
             .as_ref()
             .expect("JIT shell helper received null topology pointer")
     };
-    let mut scratch = ShellEvalScratch::default();
-    for i in 0..4 {
-        let x = unsafe { *xs.add(i) };
-        let y = unsafe { *ys.add(i) };
-        let z = unsafe { *zs.add(i) };
-        let distance = eval_shell_distance(
-            shell,
-            ShellParamsView::empty(),
-            &mut scratch,
-            x,
-            y,
-            z,
-        )
-        .distance;
+    let xs = unsafe { [*xs.add(0), *xs.add(1), *xs.add(2), *xs.add(3)] };
+    let ys = unsafe { [*ys.add(0), *ys.add(1), *ys.add(2), *ys.add(3)] };
+    let zs = unsafe { [*zs.add(0), *zs.add(1), *zs.add(2), *zs.add(3)] };
+    let distances = eval_shell_distance4(shell, xs, ys, zs);
+    for (i, distance) in distances.into_iter().enumerate() {
         unsafe { *out.add(i) = distance };
     }
 }
@@ -1519,8 +1510,9 @@ mod test {
         context::{Context, Tree},
         eval::Trace,
         shell::{
-            OpenTopPolicy, ShellProfileSectionTopology, ShellSectionTopology,
-            ShellTopology, reset_shell_eval_stats,
+            OpenTopPolicy, ShellEvalScratch, ShellParamsView,
+            ShellProfileSectionTopology, ShellSectionTopology, ShellTopology,
+            eval_shell_distance, reset_shell_eval_stats,
             set_shell_eval_stats_enabled, shell_eval_stats,
         },
         types::{Grad, Interval},
@@ -1572,6 +1564,21 @@ mod test {
                 ShellProfileSectionTopology::ship(1.0, -0.4, 0.7, 0.6),
                 ShellProfileSectionTopology::ship(2.0, -0.4, 0.7, 0.6),
                 ShellProfileSectionTopology::ship(3.0, -0.4, 0.7, 0.6),
+            ]
+            .into_boxed_slice(),
+            0.08,
+            OpenTopPolicy::Closed,
+        ))
+    }
+
+    fn profile_packet_shell() -> Arc<ShellTopology> {
+        Arc::new(ShellTopology::ship_profile_shell_hull(
+            vec![
+                ShellProfileSectionTopology::ship(0.0, -0.4, 0.7, 0.6),
+                ShellProfileSectionTopology::ship(1.0, -0.4, 0.7, 0.6),
+                ShellProfileSectionTopology::ship(2.0, -0.4, 0.7, 0.6),
+                ShellProfileSectionTopology::ship(3.0, -0.4, 0.7, 0.6),
+                ShellProfileSectionTopology::ship(4.0, -0.4, 0.7, 0.6),
             ]
             .into_boxed_slice(),
             0.08,
@@ -1732,6 +1739,44 @@ mod test {
         assert_approx_eq(out[0][1], 0.25);
         assert_approx_eq(out[0][2], 1.0);
         assert_approx_eq(out[0][3], 0.25);
+    }
+
+    #[test]
+    fn profile_shell_jit_float_slice_matches_scalar_profile_packet() {
+        let shell = profile_packet_shell();
+        let tree = Tree::shell_hull(shell.clone());
+        let mut ctx = Context::new();
+        let root = ctx.import(&tree);
+        let shape = JitFunction::new(&ctx, &[root]).unwrap();
+        let tape = shape.float_slice_tape(Default::default());
+        let samples = [
+            (1.10, 0.18, -0.18),
+            (1.25, -0.32, 0.02),
+            (1.50, 0.44, 0.26),
+            (1.85, -0.58, 0.62),
+        ];
+        let mut args = vec![vec![0.0; samples.len()]; tape.vars().len()];
+        for (i, &(x, y, z)) in samples.iter().enumerate() {
+            args[tape.vars()[&Var::X]][i] = x;
+            args[tape.vars()[&Var::Y]][i] = y;
+            args[tape.vars()[&Var::Z]][i] = z;
+        }
+
+        let mut eval = JitFunction::new_float_slice_eval();
+        let out = eval.eval(&tape, &args).unwrap();
+        let mut scratch = ShellEvalScratch::default();
+        for (i, &(x, y, z)) in samples.iter().enumerate() {
+            let scalar = eval_shell_distance(
+                &shell,
+                ShellParamsView::empty(),
+                &mut scratch,
+                x,
+                y,
+                z,
+            )
+            .distance;
+            assert_approx_eq(out[0][i], scalar);
+        }
     }
 
     #[test]
