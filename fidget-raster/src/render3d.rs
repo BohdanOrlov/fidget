@@ -120,6 +120,14 @@ pub struct VoxelRenderStats {
     pub shell_hull_profile2d_outer_gradient_calls: u64,
     /// Native shell 2D inner-profile calls from gradient sampling.
     pub shell_hull_profile2d_inner_gradient_calls: u64,
+    /// Native shell station-segment lookup calls for profile-shell samples.
+    pub shell_hull_profile2d_station_lookup_calls: u64,
+    /// Four-lane profile packet station lookup attempts.
+    pub shell_hull_profile2d_station_lookup_packet4_attempts: u64,
+    /// Four-lane profile packet station lookup hits.
+    pub shell_hull_profile2d_station_lookup_packet4_hits: u64,
+    /// Four-lane profile packet station lookup misses.
+    pub shell_hull_profile2d_station_lookup_packet4_misses: u64,
     /// Float-eval batches that performed outer profile distance work.
     pub shell_hull_profile2d_outer_distance_batches: u64,
     /// Samples in batches that performed outer profile distance work.
@@ -142,6 +150,10 @@ pub struct VoxelRenderStats {
     pub shell_hull_profile2d_edges_considered: u64,
     /// Native shell 2D candidate contour edges pruned by AABB tests.
     pub shell_hull_profile2d_edges_aabb_pruned: u64,
+    /// Native shell 2D smooth contour edges pruned by Bezier control hulls.
+    pub shell_hull_profile2d_edges_bezier_hull_pruned: u64,
+    /// Native shell 2D concrete edge distance evaluations after pruning.
+    pub shell_hull_profile2d_edge_distance_evaluations: u64,
     /// Native shell 2D candidate linear contour edges.
     pub shell_hull_profile2d_linear_edges: u64,
     /// Native shell 2D candidate smooth contour edges.
@@ -168,6 +180,8 @@ pub struct VoxelRenderStats {
     pub shell_hull_profile2d_hermite_duplicate_t_attempts: u64,
     /// Native shell 2D Hermite distance evaluations after deduping roots.
     pub shell_hull_profile2d_hermite_distance_evaluations: u64,
+    /// Native shell 2D Hermite distance evaluations performed for refined seeds.
+    pub shell_hull_profile2d_hermite_final_distance_evaluations: u64,
     /// Native shell 2D Hermite closest-point winner count.
     pub shell_hull_profile2d_hermite_wins_total: u64,
     /// Native shell 2D Hermite endpoint-seed wins.
@@ -242,6 +256,14 @@ impl VoxelRenderStats {
             other.shell_hull_profile2d_outer_gradient_calls;
         self.shell_hull_profile2d_inner_gradient_calls +=
             other.shell_hull_profile2d_inner_gradient_calls;
+        self.shell_hull_profile2d_station_lookup_calls +=
+            other.shell_hull_profile2d_station_lookup_calls;
+        self.shell_hull_profile2d_station_lookup_packet4_attempts +=
+            other.shell_hull_profile2d_station_lookup_packet4_attempts;
+        self.shell_hull_profile2d_station_lookup_packet4_hits +=
+            other.shell_hull_profile2d_station_lookup_packet4_hits;
+        self.shell_hull_profile2d_station_lookup_packet4_misses +=
+            other.shell_hull_profile2d_station_lookup_packet4_misses;
         self.shell_hull_profile2d_outer_distance_batches +=
             other.shell_hull_profile2d_outer_distance_batches;
         self.shell_hull_profile2d_outer_distance_batch_samples +=
@@ -265,6 +287,10 @@ impl VoxelRenderStats {
             other.shell_hull_profile2d_edges_considered;
         self.shell_hull_profile2d_edges_aabb_pruned +=
             other.shell_hull_profile2d_edges_aabb_pruned;
+        self.shell_hull_profile2d_edges_bezier_hull_pruned +=
+            other.shell_hull_profile2d_edges_bezier_hull_pruned;
+        self.shell_hull_profile2d_edge_distance_evaluations +=
+            other.shell_hull_profile2d_edge_distance_evaluations;
         self.shell_hull_profile2d_linear_edges +=
             other.shell_hull_profile2d_linear_edges;
         self.shell_hull_profile2d_smooth_edges +=
@@ -291,6 +317,8 @@ impl VoxelRenderStats {
             other.shell_hull_profile2d_hermite_duplicate_t_attempts;
         self.shell_hull_profile2d_hermite_distance_evaluations +=
             other.shell_hull_profile2d_hermite_distance_evaluations;
+        self.shell_hull_profile2d_hermite_final_distance_evaluations +=
+            other.shell_hull_profile2d_hermite_final_distance_evaluations;
         self.shell_hull_profile2d_hermite_wins_total +=
             other.shell_hull_profile2d_hermite_wins_total;
         self.shell_hull_profile2d_hermite_endpoint_wins +=
@@ -1182,6 +1210,14 @@ pub fn render_with_stats<F: Function>(
         shell_stats.profile2d_outer_gradient_calls;
     stats.shell_hull_profile2d_inner_gradient_calls =
         shell_stats.profile2d_inner_gradient_calls;
+    stats.shell_hull_profile2d_station_lookup_calls =
+        shell_stats.profile2d_station_lookup_calls;
+    stats.shell_hull_profile2d_station_lookup_packet4_attempts =
+        shell_stats.profile2d_station_lookup_packet4_attempts;
+    stats.shell_hull_profile2d_station_lookup_packet4_hits =
+        shell_stats.profile2d_station_lookup_packet4_hits;
+    stats.shell_hull_profile2d_station_lookup_packet4_misses =
+        shell_stats.profile2d_station_lookup_packet4_misses;
     stats.shell_hull_profile2d_segment_tests =
         shell_stats.profile2d_segment_tests;
     stats.shell_hull_profile2d_bezier_tests =
@@ -1191,6 +1227,10 @@ pub fn render_with_stats<F: Function>(
         shell_stats.profile2d_edges_considered;
     stats.shell_hull_profile2d_edges_aabb_pruned =
         shell_stats.profile2d_edges_aabb_pruned;
+    stats.shell_hull_profile2d_edges_bezier_hull_pruned =
+        shell_stats.profile2d_edges_bezier_hull_pruned;
+    stats.shell_hull_profile2d_edge_distance_evaluations =
+        shell_stats.profile2d_edge_distance_evaluations;
     stats.shell_hull_profile2d_linear_edges =
         shell_stats.profile2d_linear_edges;
     stats.shell_hull_profile2d_smooth_edges =
@@ -1217,6 +1257,8 @@ pub fn render_with_stats<F: Function>(
         shell_stats.profile2d_hermite_duplicate_t_attempts;
     stats.shell_hull_profile2d_hermite_distance_evaluations =
         shell_stats.profile2d_hermite_distance_evaluations;
+    stats.shell_hull_profile2d_hermite_final_distance_evaluations =
+        shell_stats.profile2d_hermite_final_distance_evaluations;
     stats.shell_hull_profile2d_hermite_wins_total =
         shell_stats.profile2d_hermite_wins_total;
     stats.shell_hull_profile2d_hermite_endpoint_wins =
@@ -1341,6 +1383,16 @@ pub fn render_with_stats<F: Function>(
             stats.shell_hot_loop_allocations,
             stats.shell_allocations,
         );
+        eprintln!(
+            "render3d shell profile breakdown: shell_hull_profile2d_station_lookup_calls={} shell_hull_profile2d_station_lookup_packet4_attempts={} shell_hull_profile2d_station_lookup_packet4_hits={} shell_hull_profile2d_station_lookup_packet4_misses={} shell_hull_profile2d_edges_bezier_hull_pruned={} shell_hull_profile2d_edge_distance_evaluations={} shell_hull_profile2d_hermite_final_distance_evaluations={}",
+            stats.shell_hull_profile2d_station_lookup_calls,
+            stats.shell_hull_profile2d_station_lookup_packet4_attempts,
+            stats.shell_hull_profile2d_station_lookup_packet4_hits,
+            stats.shell_hull_profile2d_station_lookup_packet4_misses,
+            stats.shell_hull_profile2d_edges_bezier_hull_pruned,
+            stats.shell_hull_profile2d_edge_distance_evaluations,
+            stats.shell_hull_profile2d_hermite_final_distance_evaluations,
+        );
     }
     Some((image, stats))
 }
@@ -1405,9 +1457,33 @@ pub fn render_leaf_debug<F: Function>(
         shell_stats.profile2d_outer_gradient_calls;
     stats.shell_hull_profile2d_inner_gradient_calls =
         shell_stats.profile2d_inner_gradient_calls;
+    stats.shell_hull_profile2d_station_lookup_calls =
+        shell_stats.profile2d_station_lookup_calls;
+    stats.shell_hull_profile2d_station_lookup_packet4_attempts =
+        shell_stats.profile2d_station_lookup_packet4_attempts;
+    stats.shell_hull_profile2d_station_lookup_packet4_hits =
+        shell_stats.profile2d_station_lookup_packet4_hits;
+    stats.shell_hull_profile2d_station_lookup_packet4_misses =
+        shell_stats.profile2d_station_lookup_packet4_misses;
     stats.shell_hull_profile2d_bezier_tests =
         shell_stats.profile2d_bezier_tests;
     stats.shell_hull_profile2d_fallbacks = shell_stats.profile2d_fallbacks;
+    stats.shell_hull_profile2d_edges_considered =
+        shell_stats.profile2d_edges_considered;
+    stats.shell_hull_profile2d_edges_aabb_pruned =
+        shell_stats.profile2d_edges_aabb_pruned;
+    stats.shell_hull_profile2d_edges_bezier_hull_pruned =
+        shell_stats.profile2d_edges_bezier_hull_pruned;
+    stats.shell_hull_profile2d_edge_distance_evaluations =
+        shell_stats.profile2d_edge_distance_evaluations;
+    stats.shell_hull_profile2d_linear_edges =
+        shell_stats.profile2d_linear_edges;
+    stats.shell_hull_profile2d_smooth_edges =
+        shell_stats.profile2d_smooth_edges;
+    stats.shell_hull_profile2d_endpoint_best_kept =
+        shell_stats.profile2d_endpoint_best_kept;
+    stats.shell_hull_profile2d_hermite_edges_refined =
+        shell_stats.profile2d_hermite_edges_refined;
     stats.shell_hull_profile2d_hermite_seed_attempts =
         shell_stats.profile2d_hermite_seed_attempts;
     stats.shell_hull_profile2d_hermite_newton_iterations =
@@ -1426,6 +1502,8 @@ pub fn render_leaf_debug<F: Function>(
         shell_stats.profile2d_hermite_duplicate_t_attempts;
     stats.shell_hull_profile2d_hermite_distance_evaluations =
         shell_stats.profile2d_hermite_distance_evaluations;
+    stats.shell_hull_profile2d_hermite_final_distance_evaluations =
+        shell_stats.profile2d_hermite_final_distance_evaluations;
     stats.shell_hull_profile2d_hermite_wins_total =
         shell_stats.profile2d_hermite_wins_total;
     stats.shell_hull_profile2d_hermite_endpoint_wins =
@@ -1675,6 +1753,13 @@ mod test {
     #[test]
     fn stats_merge_preserves_shell_summary_counters() {
         let mut stats = VoxelRenderStats {
+            shell_hull_profile2d_station_lookup_calls: 29,
+            shell_hull_profile2d_station_lookup_packet4_attempts: 3,
+            shell_hull_profile2d_station_lookup_packet4_hits: 2,
+            shell_hull_profile2d_station_lookup_packet4_misses: 1,
+            shell_hull_profile2d_edges_bezier_hull_pruned: 31,
+            shell_hull_profile2d_edge_distance_evaluations: 37,
+            shell_hull_profile2d_hermite_final_distance_evaluations: 41,
             shell_interval_rejects: 2,
             shell_active_segment_sum: 5,
             shell_active_segment_samples: 2,
@@ -1684,6 +1769,13 @@ mod test {
             ..Default::default()
         };
         stats.merge(VoxelRenderStats {
+            shell_hull_profile2d_station_lookup_calls: 43,
+            shell_hull_profile2d_station_lookup_packet4_attempts: 5,
+            shell_hull_profile2d_station_lookup_packet4_hits: 4,
+            shell_hull_profile2d_station_lookup_packet4_misses: 1,
+            shell_hull_profile2d_edges_bezier_hull_pruned: 47,
+            shell_hull_profile2d_edge_distance_evaluations: 53,
+            shell_hull_profile2d_hermite_final_distance_evaluations: 59,
             shell_interval_rejects: 3,
             shell_active_segment_sum: 4,
             shell_active_segment_samples: 1,
@@ -1693,6 +1785,19 @@ mod test {
             ..Default::default()
         });
 
+        assert_eq!(stats.shell_hull_profile2d_station_lookup_calls, 72);
+        assert_eq!(
+            stats.shell_hull_profile2d_station_lookup_packet4_attempts,
+            8
+        );
+        assert_eq!(stats.shell_hull_profile2d_station_lookup_packet4_hits, 6);
+        assert_eq!(stats.shell_hull_profile2d_station_lookup_packet4_misses, 2);
+        assert_eq!(stats.shell_hull_profile2d_edges_bezier_hull_pruned, 78);
+        assert_eq!(stats.shell_hull_profile2d_edge_distance_evaluations, 90);
+        assert_eq!(
+            stats.shell_hull_profile2d_hermite_final_distance_evaluations,
+            100
+        );
         assert_eq!(stats.shell_interval_rejects, 5);
         assert_eq!(stats.shell_active_segment_sum, 9);
         assert_eq!(stats.shell_active_segment_samples, 3);

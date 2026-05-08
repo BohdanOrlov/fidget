@@ -202,11 +202,17 @@ static PROFILE2D_OUTER_DISTANCE_CALLS: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_INNER_DISTANCE_CALLS: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_OUTER_GRADIENT_CALLS: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_INNER_GRADIENT_CALLS: AtomicU64 = AtomicU64::new(0);
+static PROFILE2D_STATION_LOOKUP_CALLS: AtomicU64 = AtomicU64::new(0);
+static PROFILE2D_STATION_LOOKUP_PACKET4_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+static PROFILE2D_STATION_LOOKUP_PACKET4_HITS: AtomicU64 = AtomicU64::new(0);
+static PROFILE2D_STATION_LOOKUP_PACKET4_MISSES: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_SEGMENT_TESTS: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_BEZIER_TESTS: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_FALLBACKS: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_EDGES_CONSIDERED: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_EDGES_AABB_PRUNED: AtomicU64 = AtomicU64::new(0);
+static PROFILE2D_EDGES_BEZIER_HULL_PRUNED: AtomicU64 = AtomicU64::new(0);
+static PROFILE2D_EDGE_DISTANCE_EVALUATIONS: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_LINEAR_EDGES: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_SMOOTH_EDGES: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_ENDPOINT_BEST_KEPT: AtomicU64 = AtomicU64::new(0);
@@ -221,6 +227,8 @@ static PROFILE2D_HERMITE_CLAMPED_ENDPOINT_ATTEMPTS: AtomicU64 =
     AtomicU64::new(0);
 static PROFILE2D_HERMITE_DUPLICATE_T_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_HERMITE_DISTANCE_EVALUATIONS: AtomicU64 = AtomicU64::new(0);
+static PROFILE2D_HERMITE_FINAL_DISTANCE_EVALUATIONS: AtomicU64 =
+    AtomicU64::new(0);
 static PROFILE2D_HERMITE_WINS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_HERMITE_ENDPOINT_WINS: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_HERMITE_QUARTER_WINS: AtomicU64 = AtomicU64::new(0);
@@ -271,6 +279,14 @@ pub struct ShellEvalStats {
     pub profile2d_outer_gradient_calls: u64,
     /// Inner profile calls from gradient evaluation.
     pub profile2d_inner_gradient_calls: u64,
+    /// Station-segment lookup calls for profile-shell point evaluation.
+    pub profile2d_station_lookup_calls: u64,
+    /// Four-lane profile packet station lookup attempts.
+    pub profile2d_station_lookup_packet4_attempts: u64,
+    /// Four-lane profile packet station lookups that stayed in one segment.
+    pub profile2d_station_lookup_packet4_hits: u64,
+    /// Four-lane profile packet station lookups that fell back to scalar.
+    pub profile2d_station_lookup_packet4_misses: u64,
     /// Profile boundary segment tests performed by the 2D evaluator.
     pub profile2d_segment_tests: u64,
     /// Quadratic profile edge closest-point tests.
@@ -281,6 +297,10 @@ pub struct ShellEvalStats {
     pub profile2d_edges_considered: u64,
     /// Candidate profile contour edges pruned by AABB lower-bound tests.
     pub profile2d_edges_aabb_pruned: u64,
+    /// Smooth contour edges pruned by the Bezier control-hull lower bound.
+    pub profile2d_edges_bezier_hull_pruned: u64,
+    /// Concrete edge distance evaluations after profile-local pruning.
+    pub profile2d_edge_distance_evaluations: u64,
     /// Candidate profile contour edges with linear endpoint continuity.
     pub profile2d_linear_edges: u64,
     /// Candidate profile contour edges with at least one smooth endpoint.
@@ -307,6 +327,8 @@ pub struct ShellEvalStats {
     pub profile2d_hermite_duplicate_t_attempts: u64,
     /// Hermite distance evaluations after duplicate refined roots are removed.
     pub profile2d_hermite_distance_evaluations: u64,
+    /// Hermite edge distance evaluations actually performed for refined seeds.
+    pub profile2d_hermite_final_distance_evaluations: u64,
     /// Hermite closest-point evaluations with an observed winning seed.
     pub profile2d_hermite_wins_total: u64,
     /// Hermite refinements where an endpoint seed produced the closest point.
@@ -366,11 +388,17 @@ pub fn reset_shell_eval_stats() {
     PROFILE2D_INNER_DISTANCE_CALLS.store(0, Ordering::Relaxed);
     PROFILE2D_OUTER_GRADIENT_CALLS.store(0, Ordering::Relaxed);
     PROFILE2D_INNER_GRADIENT_CALLS.store(0, Ordering::Relaxed);
+    PROFILE2D_STATION_LOOKUP_CALLS.store(0, Ordering::Relaxed);
+    PROFILE2D_STATION_LOOKUP_PACKET4_ATTEMPTS.store(0, Ordering::Relaxed);
+    PROFILE2D_STATION_LOOKUP_PACKET4_HITS.store(0, Ordering::Relaxed);
+    PROFILE2D_STATION_LOOKUP_PACKET4_MISSES.store(0, Ordering::Relaxed);
     PROFILE2D_SEGMENT_TESTS.store(0, Ordering::Relaxed);
     PROFILE2D_BEZIER_TESTS.store(0, Ordering::Relaxed);
     PROFILE2D_FALLBACKS.store(0, Ordering::Relaxed);
     PROFILE2D_EDGES_CONSIDERED.store(0, Ordering::Relaxed);
     PROFILE2D_EDGES_AABB_PRUNED.store(0, Ordering::Relaxed);
+    PROFILE2D_EDGES_BEZIER_HULL_PRUNED.store(0, Ordering::Relaxed);
+    PROFILE2D_EDGE_DISTANCE_EVALUATIONS.store(0, Ordering::Relaxed);
     PROFILE2D_LINEAR_EDGES.store(0, Ordering::Relaxed);
     PROFILE2D_SMOOTH_EDGES.store(0, Ordering::Relaxed);
     PROFILE2D_ENDPOINT_BEST_KEPT.store(0, Ordering::Relaxed);
@@ -384,6 +412,7 @@ pub fn reset_shell_eval_stats() {
     PROFILE2D_HERMITE_CLAMPED_ENDPOINT_ATTEMPTS.store(0, Ordering::Relaxed);
     PROFILE2D_HERMITE_DUPLICATE_T_ATTEMPTS.store(0, Ordering::Relaxed);
     PROFILE2D_HERMITE_DISTANCE_EVALUATIONS.store(0, Ordering::Relaxed);
+    PROFILE2D_HERMITE_FINAL_DISTANCE_EVALUATIONS.store(0, Ordering::Relaxed);
     PROFILE2D_HERMITE_WINS_TOTAL.store(0, Ordering::Relaxed);
     PROFILE2D_HERMITE_ENDPOINT_WINS.store(0, Ordering::Relaxed);
     PROFILE2D_HERMITE_QUARTER_WINS.store(0, Ordering::Relaxed);
@@ -425,6 +454,14 @@ pub fn shell_eval_stats() -> ShellEvalStats {
             .load(Ordering::Relaxed),
         profile2d_inner_gradient_calls: PROFILE2D_INNER_GRADIENT_CALLS
             .load(Ordering::Relaxed),
+        profile2d_station_lookup_calls: PROFILE2D_STATION_LOOKUP_CALLS
+            .load(Ordering::Relaxed),
+        profile2d_station_lookup_packet4_attempts:
+            PROFILE2D_STATION_LOOKUP_PACKET4_ATTEMPTS.load(Ordering::Relaxed),
+        profile2d_station_lookup_packet4_hits:
+            PROFILE2D_STATION_LOOKUP_PACKET4_HITS.load(Ordering::Relaxed),
+        profile2d_station_lookup_packet4_misses:
+            PROFILE2D_STATION_LOOKUP_PACKET4_MISSES.load(Ordering::Relaxed),
         profile2d_segment_tests: PROFILE2D_SEGMENT_TESTS
             .load(Ordering::Relaxed),
         profile2d_bezier_tests: PROFILE2D_BEZIER_TESTS.load(Ordering::Relaxed),
@@ -433,6 +470,10 @@ pub fn shell_eval_stats() -> ShellEvalStats {
             .load(Ordering::Relaxed),
         profile2d_edges_aabb_pruned: PROFILE2D_EDGES_AABB_PRUNED
             .load(Ordering::Relaxed),
+        profile2d_edges_bezier_hull_pruned: PROFILE2D_EDGES_BEZIER_HULL_PRUNED
+            .load(Ordering::Relaxed),
+        profile2d_edge_distance_evaluations:
+            PROFILE2D_EDGE_DISTANCE_EVALUATIONS.load(Ordering::Relaxed),
         profile2d_linear_edges: PROFILE2D_LINEAR_EDGES.load(Ordering::Relaxed),
         profile2d_smooth_edges: PROFILE2D_SMOOTH_EDGES.load(Ordering::Relaxed),
         profile2d_endpoint_best_kept: PROFILE2D_ENDPOINT_BEST_KEPT
@@ -457,6 +498,8 @@ pub fn shell_eval_stats() -> ShellEvalStats {
             PROFILE2D_HERMITE_DUPLICATE_T_ATTEMPTS.load(Ordering::Relaxed),
         profile2d_hermite_distance_evaluations:
             PROFILE2D_HERMITE_DISTANCE_EVALUATIONS.load(Ordering::Relaxed),
+        profile2d_hermite_final_distance_evaluations:
+            PROFILE2D_HERMITE_FINAL_DISTANCE_EVALUATIONS.load(Ordering::Relaxed),
         profile2d_hermite_wins_total: PROFILE2D_HERMITE_WINS_TOTAL
             .load(Ordering::Relaxed),
         profile2d_hermite_endpoint_wins: PROFILE2D_HERMITE_ENDPOINT_WINS
@@ -501,6 +544,13 @@ pub fn reset_profile2d_outer_distance_batch_calls() {
 /// Reads thread-local outer-profile distance calls for one renderer batch.
 pub fn profile2d_outer_distance_batch_calls() -> u64 {
     PROFILE2D_OUTER_DISTANCE_BATCH_CALLS.with(Cell::get)
+}
+
+#[inline(always)]
+fn record_profile2d_station_lookup_call() {
+    if shell_eval_stats_enabled() {
+        PROFILE2D_STATION_LOOKUP_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 pub(crate) fn record_shell_interval_call() {
@@ -810,18 +860,54 @@ fn shared_profile_packet_segment_index(
     topology: &ShellTopology,
     xs: [f32; 4],
 ) -> Option<usize> {
+    let stats_enabled = shell_eval_stats_enabled();
+    if stats_enabled {
+        PROFILE2D_STATION_LOOKUP_PACKET4_ATTEMPTS
+            .fetch_add(1, Ordering::Relaxed);
+    }
     if topology.segments.len() <= 3 {
+        if stats_enabled {
+            PROFILE2D_STATION_LOOKUP_PACKET4_MISSES
+                .fetch_add(1, Ordering::Relaxed);
+        }
         return None;
     }
 
-    let first =
-        monotonic_station_segment(topology, ShellParamsView::empty(), xs[0])?;
+    if stats_enabled {
+        PROFILE2D_STATION_LOOKUP_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+    let Some(first) =
+        monotonic_station_segment(topology, ShellParamsView::empty(), xs[0])
+    else {
+        if stats_enabled {
+            PROFILE2D_STATION_LOOKUP_PACKET4_MISSES
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        return None;
+    };
     for x in xs.into_iter().skip(1) {
-        if monotonic_station_segment(topology, ShellParamsView::empty(), x)?
-            != first
-        {
+        if stats_enabled {
+            PROFILE2D_STATION_LOOKUP_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+        let Some(segment) =
+            monotonic_station_segment(topology, ShellParamsView::empty(), x)
+        else {
+            if stats_enabled {
+                PROFILE2D_STATION_LOOKUP_PACKET4_MISSES
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            return None;
+        };
+        if segment != first {
+            if stats_enabled {
+                PROFILE2D_STATION_LOOKUP_PACKET4_MISSES
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             return None;
         }
+    }
+    if stats_enabled {
+        PROFILE2D_STATION_LOOKUP_PACKET4_HITS.fetch_add(1, Ordering::Relaxed);
     }
     Some(first)
 }
@@ -1015,6 +1101,7 @@ fn eval_profile_shell_hull(
         segment: 0,
     };
 
+    record_profile2d_station_lookup_call();
     for &index in
         scratch.collect_point_candidates(topology, ShellParamsView::empty(), x)
     {
@@ -1070,6 +1157,7 @@ fn eval_profile_shell_hull_gradient(
         gradient: [0.0, 0.0, 1.0],
     };
 
+    record_profile2d_station_lookup_call();
     for &index in
         scratch.collect_point_candidates(topology, ShellParamsView::empty(), x)
     {
@@ -2065,6 +2153,7 @@ fn profile_edge_distance_if_relevant(
         }
         if stats_enabled {
             PROFILE2D_SEGMENT_TESTS.fetch_add(1, Ordering::Relaxed);
+            PROFILE2D_EDGE_DISTANCE_EVALUATIONS.fetch_add(1, Ordering::Relaxed);
         }
         distance_to_segment(p, [a.half_width, a.z], [c.half_width, c.z])
     } else {
@@ -2078,6 +2167,10 @@ fn profile_edge_distance_if_relevant(
             return best;
         }
         if profile_edge_bezier_hull_cannot_beat(p, hermite, best.distance_sq) {
+            if stats_enabled {
+                PROFILE2D_EDGES_BEZIER_HULL_PRUNED
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             return best;
         }
         if stats_enabled {
@@ -2111,6 +2204,7 @@ fn profile_top_edge_distance(
     }
     if stats_enabled {
         PROFILE2D_SEGMENT_TESTS.fetch_add(1, Ordering::Relaxed);
+        PROFILE2D_EDGE_DISTANCE_EVALUATIONS.fetch_add(1, Ordering::Relaxed);
     }
     let edge = distance_to_segment(p, [top.half_width, top.z], [0.0, top.z]);
     if edge.distance_sq < best.distance_sq {
@@ -2563,6 +2657,7 @@ fn distance_to_profile_hermite_edge(
     if edge.dz.abs() <= 1.0e-8 {
         if stats_enabled {
             PROFILE2D_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+            PROFILE2D_EDGE_DISTANCE_EVALUATIONS.fetch_add(1, Ordering::Relaxed);
         }
         return distance_to_segment(
             p,
@@ -2610,6 +2705,11 @@ fn distance_to_profile_hermite_edge(
             }
             refined_ts[refined_t_count] = t;
             refined_t_count += 1;
+        }
+        if stats_enabled {
+            PROFILE2D_EDGE_DISTANCE_EVALUATIONS.fetch_add(1, Ordering::Relaxed);
+            PROFILE2D_HERMITE_FINAL_DISTANCE_EVALUATIONS
+                .fetch_add(1, Ordering::Relaxed);
         }
         let distance = edge.distance_at(p, t);
         if distance.distance_sq < best.distance_sq {
@@ -3188,6 +3288,14 @@ mod tests {
             stats.profile2d_hermite_seed_attempts, 0,
             "Bezier hull lower bound should skip Hermite refinement even when the edge AABB overlaps the query; stats={stats:?}",
         );
+        assert_eq!(
+            stats.profile2d_edges_bezier_hull_pruned, 1,
+            "Bezier hull lower-bound skips should be counted separately from AABB pruning; stats={stats:?}",
+        );
+        assert_eq!(
+            stats.profile2d_edge_distance_evaluations, 0,
+            "Bezier hull lower-bound skips should avoid concrete edge distance evaluation; stats={stats:?}",
+        );
     }
 
     #[test]
@@ -3280,6 +3388,16 @@ mod tests {
             stats.profile2d_hermite_distance_evaluations
                 + stats.profile2d_hermite_duplicate_t_attempts,
             "Hermite distance evaluations plus duplicate refined roots should account for every seed attempt; stats={stats:?}",
+        );
+        assert_eq!(
+            stats.profile2d_hermite_seed_attempts,
+            stats.profile2d_hermite_final_distance_evaluations,
+            "Hermite final distance evaluations should record every refined seed, including duplicate roots; stats={stats:?}",
+        );
+        assert!(
+            stats.profile2d_edge_distance_evaluations
+                >= stats.profile2d_hermite_final_distance_evaluations,
+            "all Hermite final distance evaluations should also be counted as profile edge distance evaluations; stats={stats:?}",
         );
     }
 
@@ -3796,6 +3914,45 @@ mod tests {
                 scalar,
             );
         }
+    }
+
+    #[test]
+    fn profile2d_records_packet_station_lookup_breakdown() {
+        let _lock = SHELL_EVAL_STATS_TEST_LOCK
+            .lock()
+            .expect("stats lock should not be poisoned");
+        let topology = ShellTopology::ship_profile_shell_hull(
+            [
+                test_profile_section(0.0),
+                test_profile_section(1.0),
+                test_profile_section(2.0),
+                test_profile_section(3.0),
+                test_profile_section(4.0),
+            ],
+            0.08,
+            OpenTopPolicy::Closed,
+        );
+        let xs = [1.10, 1.25, 1.50, 1.85];
+        let ys = [0.18, -0.32, 0.44, -0.58];
+        let zs = [-0.18, 0.02, 0.26, 0.62];
+
+        set_shell_eval_stats_enabled(true);
+        reset_shell_eval_stats();
+        let distances = eval_shell_distance4(&topology, xs, ys, zs);
+        let stats = shell_eval_stats();
+        reset_shell_eval_stats();
+        let reset_stats = shell_eval_stats();
+        set_shell_eval_stats_enabled(false);
+
+        assert!(distances.iter().all(|distance| distance.is_finite()));
+        assert_eq!(stats.profile2d_station_lookup_packet4_attempts, 1);
+        assert_eq!(stats.profile2d_station_lookup_packet4_hits, 1);
+        assert_eq!(stats.profile2d_station_lookup_packet4_misses, 0);
+        assert_eq!(stats.profile2d_station_lookup_calls, 4);
+        assert_eq!(reset_stats.profile2d_station_lookup_calls, 0);
+        assert_eq!(reset_stats.profile2d_station_lookup_packet4_attempts, 0);
+        assert_eq!(reset_stats.profile2d_station_lookup_packet4_hits, 0);
+        assert_eq!(reset_stats.profile2d_station_lookup_packet4_misses, 0);
     }
 
     fn test_profile_section(station: f32) -> ShellProfileSectionTopology {
