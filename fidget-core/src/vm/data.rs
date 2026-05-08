@@ -2,6 +2,7 @@
 use crate::{
     compiler::{RegOp, RegTape, RegisterAllocator, SsaOp, SsaTape},
     context::{BadNode, Context, Node},
+    render::{NativeRenderMetadata, ShellSegmentAabb},
     shell::{ShellIntervalTrace, ShellProfileTopology, ShellTopology},
     var::VarMap,
     vm::Choice,
@@ -348,6 +349,30 @@ impl<const N: usize> VmData<N> {
         &self.asm.shells
     }
 
+    /// Returns optional native shell metadata for render pruning.
+    pub fn native_render_metadata(&self) -> Option<NativeRenderMetadata> {
+        if self.asm.shells.is_empty() {
+            return None;
+        }
+
+        let mut metadata = NativeRenderMetadata::default();
+        for (shell_index, shell) in self.asm.shells.iter().enumerate() {
+            metadata.include_global_aabb(shell.bounds);
+            let segment_bounds = shell.segment_bounds();
+            metadata.shell_segment_aabbs.extend(
+                segment_bounds.iter().copied().enumerate().map(
+                    |(segment_index, bounds)| ShellSegmentAabb {
+                        shell_index: shell_index as u32,
+                        segment_index: segment_index as u32,
+                        bounds,
+                    },
+                ),
+            );
+        }
+
+        Some(metadata)
+    }
+
     /// Pretty-prints the inner SSA tape
     pub fn pretty_print(&self) {
         self.ssa.pretty_print();
@@ -378,7 +403,8 @@ fn reduce_shell_topology(
     shell: &Arc<ShellTopology>,
     trace: ShellIntervalTrace,
 ) -> Option<Arc<ShellTopology>> {
-    if !shell_trace_can_reduce(trace) || trace.segment_count != shell.segments.len()
+    if !shell_trace_can_reduce(trace)
+        || trace.segment_count != shell.segments.len()
     {
         return None;
     }
@@ -386,7 +412,8 @@ fn reduce_shell_topology(
     let active_indices: Vec<_> = (0..shell.segments.len())
         .filter(|index| trace.active_segment_mask & (1_u64 << index) != 0)
         .collect();
-    if active_indices.is_empty() || active_indices.len() == shell.segments.len() {
+    if active_indices.is_empty() || active_indices.len() == shell.segments.len()
+    {
         return None;
     }
 
@@ -511,14 +538,24 @@ mod test {
         let data = VmData::<3>::new(&ctx, &[xyz]).unwrap();
         assert_eq!(data.len(), 6); // 3x input, 2x add, 1x output
         let next = data
-            .simplify::<2>(&[], &[], &mut Default::default(), Default::default())
+            .simplify::<2>(
+                &[],
+                &[],
+                &mut Default::default(),
+                Default::default(),
+            )
             .unwrap();
         assert_eq!(next.len(), 8); // extra load + store
 
         let data = VmData::<2>::new(&ctx, &[xyz]).unwrap();
         assert_eq!(data.len(), 8);
         let next = data
-            .simplify::<3>(&[], &[], &mut Default::default(), Default::default())
+            .simplify::<3>(
+                &[],
+                &[],
+                &mut Default::default(),
+                Default::default(),
+            )
             .unwrap();
         assert_eq!(next.len(), 6);
     }

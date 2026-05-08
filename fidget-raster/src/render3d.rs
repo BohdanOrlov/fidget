@@ -9,12 +9,14 @@ use fidget_core::{
     eval::Function,
     shape::{Shape, ShapeBulkEval, ShapeTracingEval, ShapeVars},
     shell::{
-        reset_shell_eval_stats, set_shell_eval_stats_enabled, shell_eval_stats,
+        ShellBounds, profile2d_outer_distance_batch_calls,
+        reset_profile2d_outer_distance_batch_calls, reset_shell_eval_stats,
+        set_shell_eval_stats_enabled, shell_eval_stats,
     },
     types::{Grad, Interval},
 };
 
-use nalgebra::{Point3, Vector2, Vector3};
+use nalgebra::{Matrix4, Point3, Vector2, Vector3};
 use std::time::{Duration, Instant};
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -60,6 +62,7 @@ impl Scratch {
 struct Worker<'a, F: Function> {
     tile_sizes: TileSizesRef<'a>,
     image_size: VoxelSize,
+    model_from_image: Matrix4<f32>,
 
     /// Reusable workspace for evaluation, to minimize allocation
     scratch: Scratch,
@@ -75,6 +78,7 @@ struct Worker<'a, F: Function> {
     /// Output images for this specific tile
     out: GeometryBuffer,
     stats: VoxelRenderStats,
+    shell_stats_enabled: bool,
 }
 
 /// Aggregated counters and timings from one 3D voxel render.
@@ -108,6 +112,26 @@ pub struct VoxelRenderStats {
     pub shell_hull_profile2d_distance_calls: u64,
     /// Native shell 2D profile evaluator calls from gradient sampling.
     pub shell_hull_profile2d_gradient_calls: u64,
+    /// Native shell 2D outer-profile calls from distance sampling.
+    pub shell_hull_profile2d_outer_distance_calls: u64,
+    /// Native shell 2D inner-profile calls from distance sampling.
+    pub shell_hull_profile2d_inner_distance_calls: u64,
+    /// Native shell 2D outer-profile calls from gradient sampling.
+    pub shell_hull_profile2d_outer_gradient_calls: u64,
+    /// Native shell 2D inner-profile calls from gradient sampling.
+    pub shell_hull_profile2d_inner_gradient_calls: u64,
+    /// Float-eval batches that performed outer profile distance work.
+    pub shell_hull_profile2d_outer_distance_batches: u64,
+    /// Samples in batches that performed outer profile distance work.
+    pub shell_hull_profile2d_outer_distance_batch_samples: u64,
+    /// Largest outer profile distance call count observed in one float batch.
+    pub shell_hull_profile2d_outer_distance_max_batch_calls: u64,
+    /// Float-eval batches with outer distance calls and native-AABB-rejectable samples.
+    pub shell_hull_profile2d_outer_distance_aabb_reject_batches: u64,
+    /// Float-eval batches where every sample is outside native shell AABBs.
+    pub shell_hull_profile2d_outer_distance_aabb_reject_full_batches: u64,
+    /// Samples in outer-distance batches that are outside native shell AABBs.
+    pub shell_hull_profile2d_outer_distance_aabb_reject_samples: u64,
     /// Native shell 2D profile boundary segment tests.
     pub shell_hull_profile2d_segment_tests: u64,
     /// Native shell 2D quadratic-Bezier edge tests.
@@ -158,12 +182,38 @@ pub struct VoxelRenderStats {
     pub shell_hull_profile2d_hermite_quarter_75_wins: u64,
     /// Native shell 2D Hermite height-seed wins.
     pub shell_hull_profile2d_hermite_height_wins: u64,
+    /// Profile-shell interval tiles tested before exact profile sampling.
+    pub shell_profile_interval_tiles: u64,
+    /// Profile-shell interval tiles rejected before exact profile sampling.
+    pub shell_profile_interval_rejected_tiles: u64,
+    /// Profile-shell interval tiles that still straddle the shell.
+    pub shell_profile_interval_active_tiles: u64,
+    /// Active profile-shell interval tiles narrowed to one station segment.
+    pub shell_profile_interval_single_segment_tiles: u64,
+    /// Active profile-shell interval tiles spanning multiple station segments.
+    pub shell_profile_interval_multi_segment_tiles: u64,
     /// Native shell interval calls.
     pub shell_interval_calls: u64,
+    /// Interval tiles rejected as completely outside.
+    pub shell_interval_rejects: u64,
+    /// Sum of active profile-shell segment counts across active interval tiles.
+    pub shell_active_segment_sum: u64,
+    /// Active profile-shell interval tiles contributing to the segment average.
+    pub shell_active_segment_samples: u64,
+    /// Native shell closest-point iterations.
+    pub shell_closest_iterations: u64,
+    /// Native shell gradient helper calls.
+    pub shell_grad_helper_calls: u64,
     /// Native shell interval hot-loop allocation count.
     pub shell_interval_hot_loop_allocations: u64,
+    /// Native shell float-slice hot-loop allocation count.
+    pub shell_float_slice_hot_loop_allocations: u64,
+    /// Native shell grad-slice hot-loop allocation count.
+    pub shell_grad_slice_hot_loop_allocations: u64,
     /// Native shell hot-loop allocation count.
     pub shell_hot_loop_allocations: u64,
+    /// Native shell allocation count exposed under the renderer stats contract.
+    pub shell_allocations: u64,
 }
 
 impl VoxelRenderStats {
@@ -184,6 +234,27 @@ impl VoxelRenderStats {
             other.shell_hull_profile2d_distance_calls;
         self.shell_hull_profile2d_gradient_calls +=
             other.shell_hull_profile2d_gradient_calls;
+        self.shell_hull_profile2d_outer_distance_calls +=
+            other.shell_hull_profile2d_outer_distance_calls;
+        self.shell_hull_profile2d_inner_distance_calls +=
+            other.shell_hull_profile2d_inner_distance_calls;
+        self.shell_hull_profile2d_outer_gradient_calls +=
+            other.shell_hull_profile2d_outer_gradient_calls;
+        self.shell_hull_profile2d_inner_gradient_calls +=
+            other.shell_hull_profile2d_inner_gradient_calls;
+        self.shell_hull_profile2d_outer_distance_batches +=
+            other.shell_hull_profile2d_outer_distance_batches;
+        self.shell_hull_profile2d_outer_distance_batch_samples +=
+            other.shell_hull_profile2d_outer_distance_batch_samples;
+        self.shell_hull_profile2d_outer_distance_max_batch_calls = self
+            .shell_hull_profile2d_outer_distance_max_batch_calls
+            .max(other.shell_hull_profile2d_outer_distance_max_batch_calls);
+        self.shell_hull_profile2d_outer_distance_aabb_reject_batches +=
+            other.shell_hull_profile2d_outer_distance_aabb_reject_batches;
+        self.shell_hull_profile2d_outer_distance_aabb_reject_full_batches +=
+            other.shell_hull_profile2d_outer_distance_aabb_reject_full_batches;
+        self.shell_hull_profile2d_outer_distance_aabb_reject_samples +=
+            other.shell_hull_profile2d_outer_distance_aabb_reject_samples;
         self.shell_hull_profile2d_segment_tests +=
             other.shell_hull_profile2d_segment_tests;
         self.shell_hull_profile2d_bezier_tests +=
@@ -234,11 +305,98 @@ impl VoxelRenderStats {
             other.shell_hull_profile2d_hermite_quarter_75_wins;
         self.shell_hull_profile2d_hermite_height_wins +=
             other.shell_hull_profile2d_hermite_height_wins;
+        self.shell_profile_interval_tiles += other.shell_profile_interval_tiles;
+        self.shell_profile_interval_rejected_tiles +=
+            other.shell_profile_interval_rejected_tiles;
+        self.shell_profile_interval_active_tiles +=
+            other.shell_profile_interval_active_tiles;
+        self.shell_profile_interval_single_segment_tiles +=
+            other.shell_profile_interval_single_segment_tiles;
+        self.shell_profile_interval_multi_segment_tiles +=
+            other.shell_profile_interval_multi_segment_tiles;
         self.shell_interval_calls += other.shell_interval_calls;
+        self.shell_interval_rejects += other.shell_interval_rejects;
+        self.shell_active_segment_sum += other.shell_active_segment_sum;
+        self.shell_active_segment_samples += other.shell_active_segment_samples;
+        self.shell_closest_iterations += other.shell_closest_iterations;
+        self.shell_grad_helper_calls += other.shell_grad_helper_calls;
         self.shell_interval_hot_loop_allocations +=
             other.shell_interval_hot_loop_allocations;
+        self.shell_float_slice_hot_loop_allocations +=
+            other.shell_float_slice_hot_loop_allocations;
+        self.shell_grad_slice_hot_loop_allocations +=
+            other.shell_grad_slice_hot_loop_allocations;
         self.shell_hot_loop_allocations += other.shell_hot_loop_allocations;
+        self.shell_allocations += other.shell_allocations;
     }
+
+    /// Average active profile-shell segments per active interval tile.
+    pub fn shell_active_segment_avg(&self) -> f64 {
+        if self.shell_active_segment_samples == 0 {
+            0.0
+        } else {
+            self.shell_active_segment_sum as f64
+                / self.shell_active_segment_samples as f64
+        }
+    }
+
+    fn record_profile2d_outer_distance_batch(
+        &mut self,
+        calls: u64,
+        sample_count: usize,
+    ) {
+        if calls == 0 {
+            return;
+        }
+        self.shell_hull_profile2d_outer_distance_batches += 1;
+        self.shell_hull_profile2d_outer_distance_batch_samples +=
+            sample_count as u64;
+        self.shell_hull_profile2d_outer_distance_max_batch_calls = self
+            .shell_hull_profile2d_outer_distance_max_batch_calls
+            .max(calls);
+    }
+
+    fn record_profile2d_outer_distance_aabb_rejection_potential(
+        &mut self,
+        calls: u64,
+        sample_count: usize,
+        rejectable_samples: usize,
+    ) {
+        if calls == 0 || rejectable_samples == 0 {
+            return;
+        }
+        self.shell_hull_profile2d_outer_distance_aabb_reject_batches += 1;
+        self.shell_hull_profile2d_outer_distance_aabb_reject_samples +=
+            rejectable_samples as u64;
+        if rejectable_samples == sample_count {
+            self.shell_hull_profile2d_outer_distance_aabb_reject_full_batches +=
+                1;
+        }
+    }
+}
+
+#[inline]
+fn native_aabb_rejectable_sample_count(
+    bounds: &ShellBounds,
+    model_from_image: &Matrix4<f32>,
+    xs: &[f32],
+    ys: &[f32],
+    zs: &[f32],
+) -> usize {
+    xs.iter()
+        .zip(ys)
+        .zip(zs)
+        .filter(|((x, y), z)| {
+            let point =
+                model_from_image.transform_point(&Point3::new(**x, **y, **z));
+            point.x < bounds.min_x
+                || point.x > bounds.max_x
+                || point.y < bounds.min_y
+                || point.y > bounds.max_y
+                || point.z < bounds.min_z
+                || point.z > bounds.max_z
+        })
+        .count()
 }
 
 struct TileRenderOutput {
@@ -290,6 +448,7 @@ impl<'a, F: Function, T> RenderWorker<'a, F, T> for Worker<'a, F> {
             out: Default::default(),
             tile_sizes,
             image_size: cfg.image_size,
+            model_from_image: cfg.mat(),
 
             eval_float_slice: Default::default(),
             eval_interval: Default::default(),
@@ -299,6 +458,8 @@ impl<'a, F: Function, T> RenderWorker<'a, F, T> for Worker<'a, F> {
             shape_storage: vec![],
             workspace: Default::default(),
             stats: Default::default(),
+            shell_stats_enabled: std::env::var_os("FIDGET_RENDER3D_STATS")
+                .is_some(),
         }
     }
 
@@ -436,6 +597,7 @@ impl<F: Function> Worker<'_, F> {
             }
             return false; // completely full, stop rendering
         } else if i.lower() > 0.0 {
+            self.stats.shell_interval_rejects += 1;
             return true; // complete empty, keep going
         }
 
@@ -547,6 +709,27 @@ impl<F: Function> Worker<'_, F> {
                 }
             }
 
+            let aabb_rejectable_samples = if self.shell_stats_enabled {
+                shape
+                    .native_render_metadata()
+                    .and_then(|metadata| metadata.global_aabb)
+                    .map(|bounds| {
+                        native_aabb_rejectable_sample_count(
+                            &bounds,
+                            &self.model_from_image,
+                            &self.scratch.x[..sample_count],
+                            &self.scratch.y[..sample_count],
+                            &self.scratch.z[..sample_count],
+                        )
+                    })
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+
+            if self.shell_stats_enabled {
+                reset_profile2d_outer_distance_batch_calls();
+            }
             let start = Instant::now();
             let out = self
                 .eval_float_slice
@@ -561,6 +744,20 @@ impl<F: Function> Worker<'_, F> {
             self.stats.float_eval_time += start.elapsed();
             self.stats.float_eval_calls += 1;
             self.stats.float_eval_samples += sample_count as u64;
+            if self.shell_stats_enabled {
+                let outer_distance_calls =
+                    profile2d_outer_distance_batch_calls();
+                self.stats.record_profile2d_outer_distance_batch(
+                    outer_distance_calls,
+                    sample_count,
+                );
+                self.stats
+                    .record_profile2d_outer_distance_aabb_rejection_potential(
+                        outer_distance_calls,
+                        sample_count,
+                        aabb_rejectable_samples,
+                    );
+            }
 
             let mut write = 0;
             for column_index in 0..size {
@@ -675,6 +872,7 @@ impl<F: Function> DebugWorker<'_, F> {
             // "no value" pixels (depth=0) for interval-pruned regions.
             return false;
         } else if i.lower() > 0.0 {
+            self.stats.shell_interval_rejects += 1;
             return true; // completely empty, keep going
         }
 
@@ -787,7 +985,11 @@ impl<F: Function> DebugWorker<'_, F> {
 
                     // Preserve the same empty/full culling behavior as the
                     // recursive leaf path: don't write culled tiles.
-                    if i.upper() < 0.0 || i.lower() > 0.0 {
+                    if i.lower() > 0.0 {
+                        self.stats.shell_interval_rejects += 1;
+                        continue;
+                    }
+                    if i.upper() < 0.0 {
                         continue;
                     }
 
@@ -972,6 +1174,14 @@ pub fn render_with_stats<F: Function>(
         shell_stats.profile2d_distance_calls;
     stats.shell_hull_profile2d_gradient_calls =
         shell_stats.profile2d_gradient_calls;
+    stats.shell_hull_profile2d_outer_distance_calls =
+        shell_stats.profile2d_outer_distance_calls;
+    stats.shell_hull_profile2d_inner_distance_calls =
+        shell_stats.profile2d_inner_distance_calls;
+    stats.shell_hull_profile2d_outer_gradient_calls =
+        shell_stats.profile2d_outer_gradient_calls;
+    stats.shell_hull_profile2d_inner_gradient_calls =
+        shell_stats.profile2d_inner_gradient_calls;
     stats.shell_hull_profile2d_segment_tests =
         shell_stats.profile2d_segment_tests;
     stats.shell_hull_profile2d_bezier_tests =
@@ -1021,10 +1231,32 @@ pub fn render_with_stats<F: Function>(
         shell_stats.profile2d_hermite_quarter_75_wins;
     stats.shell_hull_profile2d_hermite_height_wins =
         shell_stats.profile2d_hermite_height_wins;
+    stats.shell_profile_interval_tiles =
+        shell_stats.profile_shell_interval_tiles;
+    stats.shell_profile_interval_rejected_tiles =
+        shell_stats.profile_shell_interval_rejected_tiles;
+    stats.shell_profile_interval_active_tiles =
+        shell_stats.profile_shell_interval_active_tiles;
+    stats.shell_profile_interval_single_segment_tiles =
+        shell_stats.profile_shell_interval_single_segment_tiles;
+    stats.shell_profile_interval_multi_segment_tiles =
+        shell_stats.profile_shell_interval_multi_segment_tiles;
     stats.shell_interval_calls = shell_stats.interval_calls;
+    stats.shell_active_segment_sum =
+        shell_stats.profile_shell_interval_active_segment_sum;
+    stats.shell_active_segment_samples =
+        shell_stats.profile_shell_interval_active_tiles;
+    stats.shell_closest_iterations =
+        shell_stats.profile2d_hermite_newton_iterations;
+    stats.shell_grad_helper_calls = shell_stats.profile2d_gradient_calls;
     stats.shell_interval_hot_loop_allocations =
         shell_stats.interval_hot_loop_allocations;
+    stats.shell_float_slice_hot_loop_allocations =
+        shell_stats.float_slice_hot_loop_allocations;
+    stats.shell_grad_slice_hot_loop_allocations =
+        shell_stats.grad_slice_hot_loop_allocations;
     stats.shell_hot_loop_allocations = shell_stats.hot_loop_allocations;
+    stats.shell_allocations = shell_stats.hot_loop_allocations;
     set_shell_eval_stats_enabled(false);
 
     if shell_stats_enabled {
@@ -1054,10 +1286,20 @@ pub fn render_with_stats<F: Function>(
             stats.grad_eval_samples,
         );
         eprintln!(
-            "render3d shell counters: shell_hull_profile2d_calls={} shell_hull_profile2d_distance_calls={} shell_hull_profile2d_gradient_calls={} shell_hull_profile2d_segment_tests={} shell_hull_profile2d_bezier_tests={} shell_hull_profile2d_fallbacks={} shell_hull_profile2d_edges_considered={} shell_hull_profile2d_edges_aabb_pruned={} shell_hull_profile2d_linear_edges={} shell_hull_profile2d_smooth_edges={} shell_hull_profile2d_endpoint_best_kept={} shell_hull_profile2d_hermite_edges_refined={} shell_hull_profile2d_hermite_seed_attempts={} shell_hull_profile2d_hermite_newton_iterations={} shell_hull_profile2d_hermite_iteration_1_attempts={} shell_hull_profile2d_hermite_iteration_2_attempts={} shell_hull_profile2d_hermite_iteration_3_attempts={} shell_hull_profile2d_hermite_iteration_4_attempts={} shell_hull_profile2d_hermite_clamped_endpoint_attempts={} shell_hull_profile2d_hermite_duplicate_t_attempts={} shell_hull_profile2d_hermite_distance_evaluations={} shell_hull_profile2d_hermite_wins_total={} shell_hull_profile2d_hermite_endpoint_wins={} shell_hull_profile2d_hermite_quarter_wins={} shell_hull_profile2d_hermite_quarter_25_wins={} shell_hull_profile2d_hermite_quarter_50_wins={} shell_hull_profile2d_hermite_quarter_75_wins={} shell_hull_profile2d_hermite_height_wins={} shell_interval_calls={} shell_interval_hot_loop_allocations={} shell_hot_loop_allocations={}",
+            "render3d shell counters: shell_hull_profile2d_calls={} shell_hull_profile2d_distance_calls={} shell_hull_profile2d_gradient_calls={} shell_hull_profile2d_outer_distance_calls={} shell_hull_profile2d_inner_distance_calls={} shell_hull_profile2d_outer_gradient_calls={} shell_hull_profile2d_inner_gradient_calls={} shell_hull_profile2d_outer_distance_batches={} shell_hull_profile2d_outer_distance_batch_samples={} shell_hull_profile2d_outer_distance_max_batch_calls={} shell_hull_profile2d_outer_distance_aabb_reject_batches={} shell_hull_profile2d_outer_distance_aabb_reject_full_batches={} shell_hull_profile2d_outer_distance_aabb_reject_samples={} shell_hull_profile2d_segment_tests={} shell_hull_profile2d_bezier_tests={} shell_hull_profile2d_fallbacks={} shell_hull_profile2d_edges_considered={} shell_hull_profile2d_edges_aabb_pruned={} shell_hull_profile2d_linear_edges={} shell_hull_profile2d_smooth_edges={} shell_hull_profile2d_endpoint_best_kept={} shell_hull_profile2d_hermite_edges_refined={} shell_hull_profile2d_hermite_seed_attempts={} shell_hull_profile2d_hermite_newton_iterations={} shell_hull_profile2d_hermite_iteration_1_attempts={} shell_hull_profile2d_hermite_iteration_2_attempts={} shell_hull_profile2d_hermite_iteration_3_attempts={} shell_hull_profile2d_hermite_iteration_4_attempts={} shell_hull_profile2d_hermite_clamped_endpoint_attempts={} shell_hull_profile2d_hermite_duplicate_t_attempts={} shell_hull_profile2d_hermite_distance_evaluations={} shell_hull_profile2d_hermite_wins_total={} shell_hull_profile2d_hermite_endpoint_wins={} shell_hull_profile2d_hermite_quarter_wins={} shell_hull_profile2d_hermite_quarter_25_wins={} shell_hull_profile2d_hermite_quarter_50_wins={} shell_hull_profile2d_hermite_quarter_75_wins={} shell_hull_profile2d_hermite_height_wins={} shell_profile_interval_tiles={} shell_profile_interval_rejected_tiles={} shell_profile_interval_active_tiles={} shell_profile_interval_single_segment_tiles={} shell_profile_interval_multi_segment_tiles={} shell_interval_calls={} shell_interval_rejects={} shell_active_segment_avg={:.3} shell_closest_iterations={} shell_grad_helper_calls={} shell_interval_hot_loop_allocations={} shell_float_slice_hot_loop_allocations={} shell_grad_slice_hot_loop_allocations={} shell_hot_loop_allocations={} shell_allocations={}",
             stats.shell_hull_profile2d_calls,
             stats.shell_hull_profile2d_distance_calls,
             stats.shell_hull_profile2d_gradient_calls,
+            stats.shell_hull_profile2d_outer_distance_calls,
+            stats.shell_hull_profile2d_inner_distance_calls,
+            stats.shell_hull_profile2d_outer_gradient_calls,
+            stats.shell_hull_profile2d_inner_gradient_calls,
+            stats.shell_hull_profile2d_outer_distance_batches,
+            stats.shell_hull_profile2d_outer_distance_batch_samples,
+            stats.shell_hull_profile2d_outer_distance_max_batch_calls,
+            stats.shell_hull_profile2d_outer_distance_aabb_reject_batches,
+            stats.shell_hull_profile2d_outer_distance_aabb_reject_full_batches,
+            stats.shell_hull_profile2d_outer_distance_aabb_reject_samples,
             stats.shell_hull_profile2d_segment_tests,
             stats.shell_hull_profile2d_bezier_tests,
             stats.shell_hull_profile2d_fallbacks,
@@ -1083,9 +1325,21 @@ pub fn render_with_stats<F: Function>(
             stats.shell_hull_profile2d_hermite_quarter_50_wins,
             stats.shell_hull_profile2d_hermite_quarter_75_wins,
             stats.shell_hull_profile2d_hermite_height_wins,
+            stats.shell_profile_interval_tiles,
+            stats.shell_profile_interval_rejected_tiles,
+            stats.shell_profile_interval_active_tiles,
+            stats.shell_profile_interval_single_segment_tiles,
+            stats.shell_profile_interval_multi_segment_tiles,
             stats.shell_interval_calls,
+            stats.shell_interval_rejects,
+            stats.shell_active_segment_avg(),
+            stats.shell_closest_iterations,
+            stats.shell_grad_helper_calls,
             stats.shell_interval_hot_loop_allocations,
+            stats.shell_float_slice_hot_loop_allocations,
+            stats.shell_grad_slice_hot_loop_allocations,
             stats.shell_hot_loop_allocations,
+            stats.shell_allocations,
         );
     }
     Some((image, stats))
@@ -1139,6 +1393,18 @@ pub fn render_leaf_debug<F: Function>(
     stats.shell_hull_profile2d_calls = shell_stats.profile2d_calls;
     stats.shell_hull_profile2d_segment_tests =
         shell_stats.profile2d_segment_tests;
+    stats.shell_hull_profile2d_distance_calls =
+        shell_stats.profile2d_distance_calls;
+    stats.shell_hull_profile2d_gradient_calls =
+        shell_stats.profile2d_gradient_calls;
+    stats.shell_hull_profile2d_outer_distance_calls =
+        shell_stats.profile2d_outer_distance_calls;
+    stats.shell_hull_profile2d_inner_distance_calls =
+        shell_stats.profile2d_inner_distance_calls;
+    stats.shell_hull_profile2d_outer_gradient_calls =
+        shell_stats.profile2d_outer_gradient_calls;
+    stats.shell_hull_profile2d_inner_gradient_calls =
+        shell_stats.profile2d_inner_gradient_calls;
     stats.shell_hull_profile2d_bezier_tests =
         shell_stats.profile2d_bezier_tests;
     stats.shell_hull_profile2d_fallbacks = shell_stats.profile2d_fallbacks;
@@ -1174,10 +1440,32 @@ pub fn render_leaf_debug<F: Function>(
         shell_stats.profile2d_hermite_quarter_75_wins;
     stats.shell_hull_profile2d_hermite_height_wins =
         shell_stats.profile2d_hermite_height_wins;
+    stats.shell_profile_interval_tiles =
+        shell_stats.profile_shell_interval_tiles;
+    stats.shell_profile_interval_rejected_tiles =
+        shell_stats.profile_shell_interval_rejected_tiles;
+    stats.shell_profile_interval_active_tiles =
+        shell_stats.profile_shell_interval_active_tiles;
+    stats.shell_profile_interval_single_segment_tiles =
+        shell_stats.profile_shell_interval_single_segment_tiles;
+    stats.shell_profile_interval_multi_segment_tiles =
+        shell_stats.profile_shell_interval_multi_segment_tiles;
     stats.shell_interval_calls = shell_stats.interval_calls;
+    stats.shell_active_segment_sum =
+        shell_stats.profile_shell_interval_active_segment_sum;
+    stats.shell_active_segment_samples =
+        shell_stats.profile_shell_interval_active_tiles;
+    stats.shell_closest_iterations =
+        shell_stats.profile2d_hermite_newton_iterations;
+    stats.shell_grad_helper_calls = shell_stats.profile2d_gradient_calls;
     stats.shell_interval_hot_loop_allocations =
         shell_stats.interval_hot_loop_allocations;
+    stats.shell_float_slice_hot_loop_allocations =
+        shell_stats.float_slice_hot_loop_allocations;
+    stats.shell_grad_slice_hot_loop_allocations =
+        shell_stats.grad_slice_hot_loop_allocations;
     stats.shell_hot_loop_allocations = shell_stats.hot_loop_allocations;
+    stats.shell_allocations = shell_stats.hot_loop_allocations;
     set_shell_eval_stats_enabled(false);
 
     if shell_stats_enabled {
@@ -1207,10 +1495,14 @@ pub fn render_leaf_debug<F: Function>(
             stats.grad_eval_samples,
         );
         eprintln!(
-            "render3d leaf-debug shell counters: shell_hull_profile2d_calls={} shell_hull_profile2d_distance_calls={} shell_hull_profile2d_gradient_calls={} shell_hull_profile2d_segment_tests={} shell_hull_profile2d_bezier_tests={} shell_hull_profile2d_fallbacks={} shell_hull_profile2d_edges_considered={} shell_hull_profile2d_edges_aabb_pruned={} shell_hull_profile2d_linear_edges={} shell_hull_profile2d_smooth_edges={} shell_hull_profile2d_endpoint_best_kept={} shell_hull_profile2d_hermite_edges_refined={} shell_hull_profile2d_hermite_seed_attempts={} shell_hull_profile2d_hermite_newton_iterations={} shell_hull_profile2d_hermite_iteration_1_attempts={} shell_hull_profile2d_hermite_iteration_2_attempts={} shell_hull_profile2d_hermite_iteration_3_attempts={} shell_hull_profile2d_hermite_iteration_4_attempts={} shell_hull_profile2d_hermite_clamped_endpoint_attempts={} shell_hull_profile2d_hermite_duplicate_t_attempts={} shell_hull_profile2d_hermite_distance_evaluations={} shell_hull_profile2d_hermite_wins_total={} shell_hull_profile2d_hermite_endpoint_wins={} shell_hull_profile2d_hermite_quarter_wins={} shell_hull_profile2d_hermite_quarter_25_wins={} shell_hull_profile2d_hermite_quarter_50_wins={} shell_hull_profile2d_hermite_quarter_75_wins={} shell_hull_profile2d_hermite_height_wins={} shell_interval_calls={} shell_interval_hot_loop_allocations={} shell_hot_loop_allocations={}",
+            "render3d leaf-debug shell counters: shell_hull_profile2d_calls={} shell_hull_profile2d_distance_calls={} shell_hull_profile2d_gradient_calls={} shell_hull_profile2d_outer_distance_calls={} shell_hull_profile2d_inner_distance_calls={} shell_hull_profile2d_outer_gradient_calls={} shell_hull_profile2d_inner_gradient_calls={} shell_hull_profile2d_segment_tests={} shell_hull_profile2d_bezier_tests={} shell_hull_profile2d_fallbacks={} shell_hull_profile2d_edges_considered={} shell_hull_profile2d_edges_aabb_pruned={} shell_hull_profile2d_linear_edges={} shell_hull_profile2d_smooth_edges={} shell_hull_profile2d_endpoint_best_kept={} shell_hull_profile2d_hermite_edges_refined={} shell_hull_profile2d_hermite_seed_attempts={} shell_hull_profile2d_hermite_newton_iterations={} shell_hull_profile2d_hermite_iteration_1_attempts={} shell_hull_profile2d_hermite_iteration_2_attempts={} shell_hull_profile2d_hermite_iteration_3_attempts={} shell_hull_profile2d_hermite_iteration_4_attempts={} shell_hull_profile2d_hermite_clamped_endpoint_attempts={} shell_hull_profile2d_hermite_duplicate_t_attempts={} shell_hull_profile2d_hermite_distance_evaluations={} shell_hull_profile2d_hermite_wins_total={} shell_hull_profile2d_hermite_endpoint_wins={} shell_hull_profile2d_hermite_quarter_wins={} shell_hull_profile2d_hermite_quarter_25_wins={} shell_hull_profile2d_hermite_quarter_50_wins={} shell_hull_profile2d_hermite_quarter_75_wins={} shell_hull_profile2d_hermite_height_wins={} shell_profile_interval_tiles={} shell_profile_interval_rejected_tiles={} shell_profile_interval_active_tiles={} shell_profile_interval_single_segment_tiles={} shell_profile_interval_multi_segment_tiles={} shell_interval_calls={} shell_interval_rejects={} shell_active_segment_avg={:.3} shell_closest_iterations={} shell_grad_helper_calls={} shell_interval_hot_loop_allocations={} shell_float_slice_hot_loop_allocations={} shell_grad_slice_hot_loop_allocations={} shell_hot_loop_allocations={} shell_allocations={}",
             stats.shell_hull_profile2d_calls,
             stats.shell_hull_profile2d_distance_calls,
             stats.shell_hull_profile2d_gradient_calls,
+            stats.shell_hull_profile2d_outer_distance_calls,
+            stats.shell_hull_profile2d_inner_distance_calls,
+            stats.shell_hull_profile2d_outer_gradient_calls,
+            stats.shell_hull_profile2d_inner_gradient_calls,
             stats.shell_hull_profile2d_segment_tests,
             stats.shell_hull_profile2d_bezier_tests,
             stats.shell_hull_profile2d_fallbacks,
@@ -1236,9 +1528,21 @@ pub fn render_leaf_debug<F: Function>(
             stats.shell_hull_profile2d_hermite_quarter_50_wins,
             stats.shell_hull_profile2d_hermite_quarter_75_wins,
             stats.shell_hull_profile2d_hermite_height_wins,
+            stats.shell_profile_interval_tiles,
+            stats.shell_profile_interval_rejected_tiles,
+            stats.shell_profile_interval_active_tiles,
+            stats.shell_profile_interval_single_segment_tiles,
+            stats.shell_profile_interval_multi_segment_tiles,
             stats.shell_interval_calls,
+            stats.shell_interval_rejects,
+            stats.shell_active_segment_avg(),
+            stats.shell_closest_iterations,
+            stats.shell_grad_helper_calls,
             stats.shell_interval_hot_loop_allocations,
+            stats.shell_float_slice_hot_loop_allocations,
+            stats.shell_grad_slice_hot_loop_allocations,
             stats.shell_hot_loop_allocations,
+            stats.shell_allocations,
         );
     }
 
@@ -1313,5 +1617,88 @@ mod test {
         let (_image, stats) = cfg.run_with_stats(shape).unwrap();
 
         assert_eq!(stats.float_eval_samples, 288);
+    }
+
+    #[test]
+    fn stats_record_outer_profile_distance_batch_locality() {
+        let mut stats = VoxelRenderStats::default();
+
+        stats.record_profile2d_outer_distance_batch(8, 3);
+        stats.record_profile2d_outer_distance_batch(0, 5);
+        stats.record_profile2d_outer_distance_aabb_rejection_potential(8, 3, 2);
+        stats.record_profile2d_outer_distance_aabb_rejection_potential(0, 5, 5);
+        stats.record_profile2d_outer_distance_aabb_rejection_potential(8, 3, 3);
+
+        assert_eq!(stats.shell_hull_profile2d_outer_distance_batches, 1);
+        assert_eq!(stats.shell_hull_profile2d_outer_distance_batch_samples, 3);
+        assert_eq!(
+            stats.shell_hull_profile2d_outer_distance_max_batch_calls,
+            8
+        );
+        assert_eq!(
+            stats.shell_hull_profile2d_outer_distance_aabb_reject_batches,
+            2
+        );
+        assert_eq!(
+            stats.shell_hull_profile2d_outer_distance_aabb_reject_full_batches,
+            1
+        );
+        assert_eq!(
+            stats.shell_hull_profile2d_outer_distance_aabb_reject_samples,
+            5
+        );
+    }
+
+    #[test]
+    fn native_aabb_rejectable_sample_count_uses_model_space_bounds() {
+        let bounds = ShellBounds {
+            min_x: 0.0,
+            min_y: 0.0,
+            min_z: 0.0,
+            max_x: 1.0,
+            max_y: 1.0,
+            max_z: 1.0,
+        };
+        let model_from_image = Matrix4::new_scaling(0.5);
+
+        let rejected = native_aabb_rejectable_sample_count(
+            &bounds,
+            &model_from_image,
+            &[0.5, 2.0, 3.0],
+            &[0.5, 2.0, 0.5],
+            &[0.5, 2.0, 0.5],
+        );
+
+        assert_eq!(rejected, 1);
+    }
+
+    #[test]
+    fn stats_merge_preserves_shell_summary_counters() {
+        let mut stats = VoxelRenderStats {
+            shell_interval_rejects: 2,
+            shell_active_segment_sum: 5,
+            shell_active_segment_samples: 2,
+            shell_closest_iterations: 7,
+            shell_grad_helper_calls: 11,
+            shell_allocations: 13,
+            ..Default::default()
+        };
+        stats.merge(VoxelRenderStats {
+            shell_interval_rejects: 3,
+            shell_active_segment_sum: 4,
+            shell_active_segment_samples: 1,
+            shell_closest_iterations: 17,
+            shell_grad_helper_calls: 19,
+            shell_allocations: 23,
+            ..Default::default()
+        });
+
+        assert_eq!(stats.shell_interval_rejects, 5);
+        assert_eq!(stats.shell_active_segment_sum, 9);
+        assert_eq!(stats.shell_active_segment_samples, 3);
+        assert_eq!(stats.shell_active_segment_avg(), 3.0);
+        assert_eq!(stats.shell_closest_iterations, 24);
+        assert_eq!(stats.shell_grad_helper_calls, 30);
+        assert_eq!(stats.shell_allocations, 36);
     }
 }

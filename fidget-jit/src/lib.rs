@@ -31,11 +31,11 @@ use fidget_core::{
         BulkEvalError, BulkEvaluator, BulkOutput, Function, MathFunction, Tape,
         TracingEvalError, TracingEvaluator,
     },
-    render::{RenderHints, TileSizes},
+    render::{NativeRenderMetadata, RenderHints, TileSizes},
     shell::{
-        ShellEvalScratch, ShellParamsView, ShellTopology, eval_shell_distance,
-        eval_shell_grad, eval_shell_interval, eval_shell_interval_with_trace,
-        ShellIntervalTrace,
+        ShellEvalScratch, ShellIntervalTrace, ShellParamsView, ShellTopology,
+        eval_shell_distance, eval_shell_grad, eval_shell_interval,
+        eval_shell_interval_with_trace,
     },
     types::{Grad, Interval},
     var::VarMap,
@@ -111,7 +111,7 @@ const CHOICE_BOTH: u32 = Choice::Both as u32;
 
 thread_local! {
     static JIT_SHELL_INTERVAL_TRACES:
-        RefCell<Vec<(usize, ShellIntervalTrace)>> = RefCell::new(Vec::new());
+        RefCell<Vec<(usize, ShellIntervalTrace)>> = const { RefCell::new(Vec::new()) };
 }
 
 fn clear_jit_shell_interval_traces() {
@@ -1077,6 +1077,10 @@ impl Function for JitFunction {
     }
 
     #[inline]
+    fn native_render_metadata(&self) -> Option<NativeRenderMetadata> {
+        self.0.native_render_metadata()
+    }
+
     fn size(&self) -> usize {
         self.0.size()
     }
@@ -1214,11 +1218,7 @@ unsafe impl<T> Sync for JitTracingFn<T> {}
 
 impl<T: From<f32> + Clone> JitTracingEval<T> {
     /// Evaluates a single point, capturing trace data into this evaluator.
-    fn eval_and_trace(
-        &mut self,
-        tape: &JitTracingFn<T>,
-        vars: &[T],
-    ) -> bool {
+    fn eval_and_trace(&mut self, tape: &JitTracingFn<T>, vars: &[T]) -> bool {
         let mut simplify = 0;
         self.choices.resize(tape.choice_count, Choice::Unknown);
         self.choices.fill(Choice::Unknown);
@@ -1238,9 +1238,11 @@ impl<T: From<f32> + Clone> JitTracingEval<T> {
         };
         if tape.has_shell_distance {
             drain_jit_shell_interval_traces(|shell_ptr, trace| {
-                if let Some(index) = tape._shells.iter().position(|shell| {
-                    Arc::as_ptr(shell) as usize == shell_ptr
-                }) {
+                if let Some(index) = tape
+                    ._shells
+                    .iter()
+                    .position(|shell| Arc::as_ptr(shell) as usize == shell_ptr)
+                {
                     self.choices.record_shell_trace(index as u32, trace);
                 }
             });
@@ -1256,14 +1258,7 @@ impl<T: From<f32> + Clone> JitTracingEval<T> {
     ) -> (&[T], Option<&VmTrace>) {
         let simplify = self.eval_and_trace(tape, vars);
 
-        (
-            &self.out,
-            if simplify {
-                Some(&self.choices)
-            } else {
-                None
-            },
-        )
+        (&self.out, if simplify { Some(&self.choices) } else { None })
     }
 }
 
@@ -1525,8 +1520,8 @@ mod test {
         eval::Trace,
         shell::{
             OpenTopPolicy, ShellProfileSectionTopology, ShellSectionTopology,
-            ShellTopology, reset_shell_eval_stats, set_shell_eval_stats_enabled,
-            shell_eval_stats,
+            ShellTopology, reset_shell_eval_stats,
+            set_shell_eval_stats_enabled, shell_eval_stats,
         },
         types::{Grad, Interval},
         var::Var,
@@ -1641,7 +1636,8 @@ mod test {
 
         let mut eval = JitFunction::new_interval_eval();
         let (_out, trace) = eval.eval(&tape, &args).unwrap();
-        let trace = trace.expect("JIT shell active trace should request simplification");
+        let trace = trace
+            .expect("JIT shell active trace should request simplification");
         assert!(trace.keep_simplified_shape());
 
         let simplified = shape

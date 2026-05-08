@@ -7,11 +7,15 @@ use crate::{
         BulkEvalError, BulkEvaluator, BulkOutput, Function, MathFunction, Tape,
         Trace, TracingEvalError, TracingEvaluator,
     },
-    render::{RenderHints, TileSizes},
+    render::{
+        NativeRenderMetadata, RenderHints, ShellActiveSegmentTraceSummary,
+        TileSizes,
+    },
     shape::Shape,
     shell::{
         ShellEvalScratch, ShellIntervalTrace, ShellTopology,
-        eval_shell_distance, eval_shell_interval, eval_shell_interval_with_trace,
+        eval_shell_distance, eval_shell_interval,
+        eval_shell_interval_with_trace,
     },
     types::{Grad, Interval},
     var::VarMap,
@@ -96,7 +100,11 @@ impl VmTrace {
         self.shell_traces.resize(n, None);
     }
     /// Records a shell interval trace for a topology sidecar.
-    pub fn record_shell_trace(&mut self, shell: u32, trace: ShellIntervalTrace) {
+    pub fn record_shell_trace(
+        &mut self,
+        shell: u32,
+        trace: ShellIntervalTrace,
+    ) {
         if let Some(slot) = self.shell_traces.get_mut(shell as usize) {
             *slot = Some(trace);
         }
@@ -112,6 +120,25 @@ impl VmTrace {
     pub fn shell_traces(&self) -> &[Option<ShellIntervalTrace>] {
         &self.shell_traces
     }
+    /// Returns active segment trace summaries for render metadata.
+    pub fn active_segment_trace_summaries(
+        &self,
+    ) -> Vec<ShellActiveSegmentTraceSummary> {
+        self.shell_traces
+            .iter()
+            .enumerate()
+            .filter_map(|(shell_index, trace)| {
+                trace.map(|trace| ShellActiveSegmentTraceSummary {
+                    shell_index: shell_index as u32,
+                    active_segment_mask: trace.active_segment_mask,
+                    segment_count: trace.segment_count,
+                    sidecar_reduction_eligible: trace
+                        .sidecar_reduction_eligible,
+                })
+            })
+            .collect()
+    }
+
     /// Returns the inner choice slice
     pub fn as_slice(&self) -> &[Choice] {
         self.choices.as_slice()
@@ -282,6 +309,10 @@ impl<const N: usize> Function for GenericVmFunction<N> {
     }
 
     #[inline]
+    fn native_render_metadata(&self) -> Option<NativeRenderMetadata> {
+        self.0.native_render_metadata()
+    }
+
     fn size(&self) -> usize {
         GenericVmFunction::size(self)
     }
@@ -492,7 +523,9 @@ impl<const N: usize> TracingEvaluator for VmIntervalEval<N> {
                     let (interval, shell_trace) =
                         eval_shell_interval_with_trace(shell, v[x], v[y], v[z]);
                     v[out] = interval;
-                    if let Some(slot) = shell_traces.get_mut(shell_index as usize) {
+                    if let Some(slot) =
+                        shell_traces.get_mut(shell_index as usize)
+                    {
                         *slot = Some(shell_trace);
                     }
                     simplify |= shell_trace_can_simplify(&shell_trace);
@@ -1668,6 +1701,59 @@ mod test {
     crate::interval_tests!(VmFunction);
     crate::float_slice_tests!(VmFunction);
     crate::point_tests!(VmFunction);
+
+    #[test]
+    fn vm_native_shell_render_metadata_reports_bounds_and_segments() {
+        use crate::{
+            context::Tree,
+            shell::{ShellSectionTopology, ShellTopology},
+        };
+
+        let shell = Arc::new(ShellTopology::line_loft_circles(
+            vec![
+                ShellSectionTopology::circle(0.0, 0.0, 0.0, 1.0),
+                ShellSectionTopology::circle(1.0, 0.0, 0.0, 1.0),
+                ShellSectionTopology::circle(2.0, 0.0, 0.0, 1.0),
+            ]
+            .into_boxed_slice(),
+        ));
+        let tree = Tree::line_loft_shell(shell);
+        let mut ctx = Context::new();
+        let root = ctx.import(&tree);
+        let function = VmFunction::new(&ctx, &[root]).unwrap();
+        let metadata = function.native_render_metadata().unwrap();
+
+        let global = metadata.global_aabb.unwrap();
+        assert_eq!(metadata.shell_segment_aabbs.len(), 2);
+        assert!(global.min_x <= 0.0 && global.max_x >= 2.0);
+        assert!(global.min_y <= -1.0 && global.max_y >= 1.0);
+        assert_eq!(metadata.shell_segment_aabbs[0].shell_index, 0);
+        assert_eq!(metadata.shell_segment_aabbs[0].segment_index, 0);
+        assert!(metadata.shell_segment_aabbs[0].bounds.max_x <= 1.0);
+        assert_eq!(metadata.shell_segment_aabbs[1].segment_index, 1);
+        assert!(metadata.shell_segment_aabbs[1].bounds.min_x >= 1.0);
+    }
+
+    #[test]
+    fn vm_trace_reports_active_segment_summaries() {
+        let mut trace = VmTrace::default();
+        trace.resize_shells(2);
+        trace.record_shell_trace(
+            1,
+            ShellIntervalTrace {
+                active_segment_mask: 0b010,
+                segment_count: 3,
+                sidecar_reduction_eligible: true,
+            },
+        );
+
+        let summaries = trace.active_segment_trace_summaries();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].shell_index, 1);
+        assert_eq!(summaries[0].active_segment_mask, 0b010);
+        assert_eq!(summaries[0].segment_count, 3);
+        assert!(summaries[0].sidecar_reduction_eligible);
+    }
 
     #[test]
     fn vm_3d_tile_hints_preserve_general_render_defaults() {

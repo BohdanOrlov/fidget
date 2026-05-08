@@ -13,8 +13,9 @@ pub mod topology;
 pub use bounds::ShellBounds;
 pub use eval::{
     ShellEvalScratch, ShellEvalStats, ShellSample, eval_shell_distance,
-    eval_shell_grad, reset_shell_eval_stats, set_shell_eval_stats_enabled,
-    shell_eval_stats,
+    eval_shell_grad, profile2d_outer_distance_batch_calls,
+    reset_profile2d_outer_distance_batch_calls, reset_shell_eval_stats,
+    set_shell_eval_stats_enabled, shell_eval_stats,
 };
 pub use interval::{
     ShellIntervalTrace, eval_shell_interval, eval_shell_interval_with_trace,

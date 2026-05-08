@@ -22,10 +22,6 @@ use crate::{
     var::Var,
 };
 
-#[cfg(test)]
-static SHELL_EVAL_STATS_TEST_LOCK: std::sync::Mutex<()> =
-    std::sync::Mutex::new(());
-
 /// Builds a function which stresses the register allocator and function caller
 pub fn build_stress_fn(n: usize) -> (Context, Node) {
     let mut inputs = vec![];

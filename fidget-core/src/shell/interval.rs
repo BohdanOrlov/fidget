@@ -42,7 +42,22 @@ pub fn eval_shell_interval(
     }
 
     if let Some(profile) = topology.profile.as_ref() {
-        if let Some(gap) = outside_profile_segment_gap(
+        if super::eval::shell_eval_stats_enabled() {
+            let profile_trace = profile_active_segment_trace(
+                profile,
+                topology.shell_thickness,
+                x,
+                y,
+                z,
+            );
+            super::eval::record_profile_shell_interval_tile(
+                profile_trace.active_segment_mask,
+                topology.segments.len(),
+            );
+            if profile_trace.active_segment_mask == 0 {
+                return Interval::new(profile_trace.best_gap, f32::INFINITY);
+            }
+        } else if let Some(gap) = outside_profile_segment_gap(
             profile,
             topology.shell_thickness,
             x,
@@ -96,6 +111,10 @@ pub fn eval_shell_interval_with_trace(
             segment_count: topology.segments.len(),
             sidecar_reduction_eligible: false,
         };
+        super::eval::record_profile_shell_interval_tile(
+            profile_trace.active_segment_mask,
+            topology.segments.len(),
+        );
         if profile_trace.active_segment_mask == 0 {
             return (
                 Interval::new(profile_trace.best_gap, f32::INFINITY),
@@ -656,10 +675,15 @@ mod tests {
     use super::*;
     use crate::shell::{
         OpenTopPolicy, ShellProfileSectionTopology, ShellTopology,
+        eval::SHELL_EVAL_STATS_TEST_LOCK, reset_shell_eval_stats,
+        set_shell_eval_stats_enabled, shell_eval_stats,
     };
 
     #[test]
     fn profile_shell_interval_prunes_width_outside_low_keel_profile() {
+        let _lock = SHELL_EVAL_STATS_TEST_LOCK
+            .lock()
+            .expect("stats lock should not be poisoned");
         let topology = ShellTopology::ship_profile_shell_hull(
             [
                 ShellProfileSectionTopology::ship(0.0, -0.5, 0.2, 0.5),
@@ -684,6 +708,9 @@ mod tests {
 
     #[test]
     fn profile_shell_interval_uses_tight_monotone_edge_width() {
+        let _lock = SHELL_EVAL_STATS_TEST_LOCK
+            .lock()
+            .expect("stats lock should not be poisoned");
         let topology = ShellTopology::ship_profile_shell_hull(
             [
                 ShellProfileSectionTopology::ship(0.0, -0.5, 0.2, 0.5),
@@ -706,4 +733,84 @@ mod tests {
         );
     }
 
+    #[test]
+    fn profile_shell_interval_trace_records_tile_outcomes() {
+        let _lock = SHELL_EVAL_STATS_TEST_LOCK
+            .lock()
+            .expect("stats lock should not be poisoned");
+        let topology = ShellTopology::ship_profile_shell_hull(
+            [
+                ShellProfileSectionTopology::ship(0.0, -0.5, 0.2, 0.5),
+                ShellProfileSectionTopology::ship(2.0, -0.5, 0.2, 0.5),
+            ],
+            0.10,
+            OpenTopPolicy::Closed,
+        );
+
+        set_shell_eval_stats_enabled(true);
+        reset_shell_eval_stats();
+        let (rejected, rejected_trace) = eval_shell_interval_with_trace(
+            &topology,
+            Interval::new(0.9, 1.1),
+            Interval::new(0.40, 0.45),
+            Interval::new(-0.50, -0.45),
+        );
+        let (active, active_trace) = eval_shell_interval_with_trace(
+            &topology,
+            Interval::new(0.9, 1.1),
+            Interval::new(0.0, 0.05),
+            Interval::new(-0.45, -0.40),
+        );
+        let stats = shell_eval_stats();
+        set_shell_eval_stats_enabled(false);
+
+        assert!(rejected.lower() > 0.0);
+        assert_eq!(rejected_trace.active_segment_mask, 0);
+        assert!(active.lower() <= 0.0 && active.upper() >= 0.0);
+        assert_ne!(active_trace.active_segment_mask, 0);
+        assert_eq!(stats.profile_shell_interval_tiles, 2);
+        assert_eq!(stats.profile_shell_interval_rejected_tiles, 1);
+        assert_eq!(stats.profile_shell_interval_active_tiles, 1);
+        assert_eq!(stats.profile_shell_interval_single_segment_tiles, 1);
+        assert_eq!(stats.profile_shell_interval_active_segment_sum, 1);
+    }
+
+    #[test]
+    fn profile_shell_interval_records_non_tracing_tile_outcomes() {
+        let _lock = SHELL_EVAL_STATS_TEST_LOCK
+            .lock()
+            .expect("stats lock should not be poisoned");
+        let topology = ShellTopology::ship_profile_shell_hull(
+            [
+                ShellProfileSectionTopology::ship(0.0, -0.5, 0.2, 0.5),
+                ShellProfileSectionTopology::ship(2.0, -0.5, 0.2, 0.5),
+            ],
+            0.10,
+            OpenTopPolicy::Closed,
+        );
+
+        set_shell_eval_stats_enabled(true);
+        reset_shell_eval_stats();
+        let rejected = eval_shell_interval(
+            &topology,
+            Interval::new(0.9, 1.1),
+            Interval::new(0.40, 0.45),
+            Interval::new(-0.50, -0.45),
+        );
+        let active = eval_shell_interval(
+            &topology,
+            Interval::new(0.9, 1.1),
+            Interval::new(0.0, 0.05),
+            Interval::new(-0.45, -0.40),
+        );
+        let stats = shell_eval_stats();
+        set_shell_eval_stats_enabled(false);
+
+        assert!(rejected.lower() > 0.0);
+        assert!(active.lower() <= 0.0 && active.upper() >= 0.0);
+        assert_eq!(stats.profile_shell_interval_tiles, 2);
+        assert_eq!(stats.profile_shell_interval_rejected_tiles, 1);
+        assert_eq!(stats.profile_shell_interval_active_tiles, 1);
+        assert_eq!(stats.profile_shell_interval_active_segment_sum, 1);
+    }
 }

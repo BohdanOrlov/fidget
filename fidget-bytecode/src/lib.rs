@@ -40,6 +40,13 @@
 //! [`BytecodeOp::Mem`], using the immediate flag `0xFF` to indicate whether the
 //! operation reads or writes to memory.  The second word is the `u32` immediate
 //! representing a memory slot.
+//!
+//! This packed `u32` format does not have a sidecar section.  Native shell
+//! operations such as [`RegOp::ShellDistance`] require serialized
+//! [`ShellTopology`](fidget_core::shell::ShellTopology) sidecars, so
+//! [`Bytecode::new`] rejects shell-bearing tapes with
+//! [`BytecodeBuildError::UnsupportedNativeShell`] instead of dropping the
+//! sidecars or expanding the op into generic math.
 
 #![warn(missing_docs)]
 
@@ -59,9 +66,10 @@ pub enum BytecodeBuildError {
     #[error(transparent)]
     ReservedRegister(#[from] ReservedRegister),
 
-    /// The current bytecode format cannot serialize native shell ops.
+    /// The current bytecode format cannot serialize native shell ops because
+    /// it has no topology sidecar section.
     #[error(
-        "native shell bytecode is unsupported by the current bytecode format"
+        "native shell bytecode requires topology sidecars, which are unsupported by the current bytecode format"
     )]
     UnsupportedNativeShell,
 }
@@ -118,52 +126,64 @@ pub enum BytecodeOp {
 
 impl From<RegOp> for BytecodeOp {
     fn from(op: RegOp) -> Self {
-        match op {
-            RegOp::Input(..) => BytecodeOp::Input,
-            RegOp::Output(..) => BytecodeOp::Output,
-            RegOp::NegReg(..) => BytecodeOp::Neg,
-            RegOp::AbsReg(..) => BytecodeOp::Abs,
-            RegOp::RecipReg(..) => BytecodeOp::Recip,
-            RegOp::SqrtReg(..) => BytecodeOp::Sqrt,
-            RegOp::SquareReg(..) => BytecodeOp::Square,
-            RegOp::FloorReg(..) => BytecodeOp::Floor,
-            RegOp::CeilReg(..) => BytecodeOp::Ceil,
-            RegOp::RoundReg(..) => BytecodeOp::Round,
-            RegOp::SinReg(..) => BytecodeOp::Sin,
-            RegOp::CosReg(..) => BytecodeOp::Cos,
-            RegOp::TanReg(..) => BytecodeOp::Tan,
-            RegOp::AsinReg(..) => BytecodeOp::Asin,
-            RegOp::AcosReg(..) => BytecodeOp::Acos,
-            RegOp::AtanReg(..) => BytecodeOp::Atan,
-            RegOp::ExpReg(..) => BytecodeOp::Exp,
-            RegOp::LnReg(..) => BytecodeOp::Ln,
-            RegOp::NotReg(..) => BytecodeOp::Not,
-            RegOp::Load(..) | RegOp::Store(..) => BytecodeOp::Mem,
-            RegOp::CopyImm(..) | RegOp::CopyReg(..) => BytecodeOp::Copy,
+        Self::from_reg_op(op)
+            .expect("native shell bytecode is unsupported by this format")
+    }
+}
 
-            RegOp::AddRegReg(..) | RegOp::AddRegImm(..) => BytecodeOp::Add,
-            RegOp::MulRegReg(..) | RegOp::MulRegImm(..) => BytecodeOp::Mul,
+impl BytecodeOp {
+    /// Maps a register operation to its bytecode opcode.
+    ///
+    /// Returns [`BytecodeBuildError::UnsupportedNativeShell`] for
+    /// [`RegOp::ShellDistance`], because the packed `u32` bytecode format has
+    /// no section for the required shell topology sidecars.
+    pub fn from_reg_op(op: RegOp) -> Result<Self, BytecodeBuildError> {
+        match op {
+            RegOp::Input(..) => Ok(BytecodeOp::Input),
+            RegOp::Output(..) => Ok(BytecodeOp::Output),
+            RegOp::NegReg(..) => Ok(BytecodeOp::Neg),
+            RegOp::AbsReg(..) => Ok(BytecodeOp::Abs),
+            RegOp::RecipReg(..) => Ok(BytecodeOp::Recip),
+            RegOp::SqrtReg(..) => Ok(BytecodeOp::Sqrt),
+            RegOp::SquareReg(..) => Ok(BytecodeOp::Square),
+            RegOp::FloorReg(..) => Ok(BytecodeOp::Floor),
+            RegOp::CeilReg(..) => Ok(BytecodeOp::Ceil),
+            RegOp::RoundReg(..) => Ok(BytecodeOp::Round),
+            RegOp::SinReg(..) => Ok(BytecodeOp::Sin),
+            RegOp::CosReg(..) => Ok(BytecodeOp::Cos),
+            RegOp::TanReg(..) => Ok(BytecodeOp::Tan),
+            RegOp::AsinReg(..) => Ok(BytecodeOp::Asin),
+            RegOp::AcosReg(..) => Ok(BytecodeOp::Acos),
+            RegOp::AtanReg(..) => Ok(BytecodeOp::Atan),
+            RegOp::ExpReg(..) => Ok(BytecodeOp::Exp),
+            RegOp::LnReg(..) => Ok(BytecodeOp::Ln),
+            RegOp::NotReg(..) => Ok(BytecodeOp::Not),
+            RegOp::Load(..) | RegOp::Store(..) => Ok(BytecodeOp::Mem),
+            RegOp::CopyImm(..) | RegOp::CopyReg(..) => Ok(BytecodeOp::Copy),
+
+            RegOp::AddRegReg(..) | RegOp::AddRegImm(..) => Ok(BytecodeOp::Add),
+            RegOp::MulRegReg(..) | RegOp::MulRegImm(..) => Ok(BytecodeOp::Mul),
             RegOp::DivRegReg(..)
             | RegOp::DivRegImm(..)
-            | RegOp::DivImmReg(..) => BytecodeOp::Div,
+            | RegOp::DivImmReg(..) => Ok(BytecodeOp::Div),
             RegOp::SubRegReg(..)
             | RegOp::SubRegImm(..)
-            | RegOp::SubImmReg(..) => BytecodeOp::Sub,
+            | RegOp::SubImmReg(..) => Ok(BytecodeOp::Sub),
             RegOp::AtanRegReg(..)
             | RegOp::AtanRegImm(..)
-            | RegOp::AtanImmReg(..) => BytecodeOp::Atan2,
-            RegOp::MinRegReg(..) | RegOp::MinRegImm(..) => BytecodeOp::Min,
-            RegOp::MaxRegReg(..) | RegOp::MaxRegImm(..) => BytecodeOp::Max,
+            | RegOp::AtanImmReg(..) => Ok(BytecodeOp::Atan2),
+            RegOp::MinRegReg(..) | RegOp::MinRegImm(..) => Ok(BytecodeOp::Min),
+            RegOp::MaxRegReg(..) | RegOp::MaxRegImm(..) => Ok(BytecodeOp::Max),
             RegOp::CompareRegReg(..)
             | RegOp::CompareRegImm(..)
-            | RegOp::CompareImmReg(..) => BytecodeOp::Compare,
+            | RegOp::CompareImmReg(..) => Ok(BytecodeOp::Compare),
             RegOp::ModRegReg(..)
             | RegOp::ModRegImm(..)
-            | RegOp::ModImmReg(..) => BytecodeOp::Mod,
-            RegOp::AndRegReg(..) | RegOp::AndRegImm(..) => BytecodeOp::And,
-            RegOp::OrRegReg(..) | RegOp::OrRegImm(..) => BytecodeOp::Or,
+            | RegOp::ModImmReg(..) => Ok(BytecodeOp::Mod),
+            RegOp::AndRegReg(..) | RegOp::AndRegImm(..) => Ok(BytecodeOp::And),
+            RegOp::OrRegReg(..) | RegOp::OrRegImm(..) => Ok(BytecodeOp::Or),
             RegOp::ShellDistance(..) => {
-                panic!("native shell bytecode is not implemented")
+                Err(BytecodeBuildError::UnsupportedNativeShell)
             }
         }
     }
@@ -322,7 +342,7 @@ impl Bytecode {
                     return Err(BytecodeBuildError::UnsupportedNativeShell);
                 }
             };
-            word[0] = BytecodeOp::from(op) as u8;
+            word[0] = BytecodeOp::from_reg_op(op)? as u8;
             data.push(u32::from_le_bytes(word));
             data.push(imm.unwrap_or(0xFF000000));
         }
@@ -384,6 +404,13 @@ mod test {
 
     #[test]
     fn native_shell_bytecode_fails_explicitly() {
+        assert!(matches!(
+            BytecodeOp::from_reg_op(
+                fidget_core::compiler::RegOp::ShellDistance(0, 0, 0, 1, 2)
+            ),
+            Err(BytecodeBuildError::UnsupportedNativeShell)
+        ));
+
         use fidget_core::{
             context::Tree,
             shell::{ShellSectionTopology, ShellTopology},

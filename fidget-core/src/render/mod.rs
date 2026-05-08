@@ -2,7 +2,60 @@
 use crate::{
     eval::{BulkEvaluator, Function, Trace, TracingEvaluator},
     shape::{Shape, ShapeTape},
+    shell::ShellBounds,
 };
+
+/// Conservative AABB for one native shell segment.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShellSegmentAabb {
+    /// Shell sidecar table index.
+    pub shell_index: u32,
+    /// Segment index inside the shell sidecar.
+    pub segment_index: u32,
+    /// Conservative segment bounds in model space.
+    pub bounds: ShellBounds,
+}
+
+/// Summary of active native shell segments recorded during tracing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShellActiveSegmentTraceSummary {
+    /// Shell sidecar table index.
+    pub shell_index: u32,
+    /// Conservative active segment bitmask.
+    pub active_segment_mask: u64,
+    /// Number of segments represented by the bitmask.
+    pub segment_count: usize,
+    /// Whether the trace may be used for sidecar simplification.
+    pub sidecar_reduction_eligible: bool,
+}
+
+/// Optional native metadata that renderers can use for shell pruning.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NativeRenderMetadata {
+    /// Conservative global AABB for native sidecars, if any are present.
+    pub global_aabb: Option<ShellBounds>,
+    /// Conservative AABB table for native shell segments.
+    pub shell_segment_aabbs: Vec<ShellSegmentAabb>,
+    /// Active segment traces captured by the latest tracing evaluation.
+    pub active_segment_traces: Vec<ShellActiveSegmentTraceSummary>,
+}
+
+impl NativeRenderMetadata {
+    /// Returns true when no metadata is available.
+    pub fn is_empty(&self) -> bool {
+        self.global_aabb.is_none()
+            && self.shell_segment_aabbs.is_empty()
+            && self.active_segment_traces.is_empty()
+    }
+
+    /// Expands the global AABB to include `bounds`.
+    pub fn include_global_aabb(&mut self, bounds: ShellBounds) {
+        match self.global_aabb.as_mut() {
+            Some(global) => global.include_bounds(bounds),
+            None => self.global_aabb = Some(bounds),
+        }
+    }
+}
 
 mod config;
 mod region;
@@ -51,6 +104,11 @@ impl<F: Function, T> RenderHandle<F, T> {
             g_tape: None,
             next: None,
         }
+    }
+
+    /// Returns optional native metadata for render pruning.
+    pub fn native_render_metadata(&self) -> Option<NativeRenderMetadata> {
+        self.shape.native_render_metadata()
     }
 
     /// Returns a tape for tracing interval evaluation
@@ -122,7 +180,8 @@ impl<F: Function, T> RenderHandle<F, T> {
         if self.next.is_none() {
             let s = shape_storage.pop().unwrap_or_default();
             let next = self.shape.simplify(trace, s, workspace).unwrap();
-            if next.size() >= self.shape.size() && !trace.keep_simplified_shape()
+            if next.size() >= self.shape.size()
+                && !trace.keep_simplified_shape()
             {
                 // Optimization: if the simplified shape isn't any shorter, then
                 // don't use it (this saves time spent generating tapes)

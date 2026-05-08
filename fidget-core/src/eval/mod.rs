@@ -1,6 +1,7 @@
 //! Traits and data structures for function evaluation
 use crate::{
     context::{BadNode, Context, Node},
+    render::NativeRenderMetadata,
     types::{Grad, Interval},
     var::VarMap,
     vm::BadTrace,
@@ -188,6 +189,11 @@ pub trait Function: Send + Sync + Clone {
     /// This may fail, because functions are `Clone` and are often implemented
     /// using an `Arc` around a heavier data structure.
     fn recycle(self) -> Option<Self::Storage>;
+
+    /// Returns optional native metadata for render pruning.
+    fn native_render_metadata(&self) -> Option<NativeRenderMetadata> {
+        None
+    }
 
     /// Returns a size associated with this function
     ///

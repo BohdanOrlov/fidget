@@ -604,6 +604,24 @@ impl ShellTopology {
             }),
         }
     }
+    /// Returns conservative AABBs for each native shell segment.
+    pub fn segment_bounds(&self) -> Box<[ShellBounds]> {
+        self.segments
+            .iter()
+            .copied()
+            .map(|segment| {
+                let mut bounds = ShellBounds::empty();
+                include_segment_bounds(
+                    &mut bounds,
+                    &self.sections,
+                    segment,
+                    self.shell_thickness,
+                );
+                bounds
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+    }
 }
 
 fn compute_station_mapping(

@@ -9,8 +9,8 @@ use crate::{
     shell::{
         OpenTopPolicy, ShellEvalScratch, ShellParamsView,
         ShellProfileSectionTopology, ShellSectionTopology, ShellTopology,
-        eval_shell_distance, reset_shell_eval_stats,
-        set_shell_eval_stats_enabled, shell_eval_stats,
+        eval::SHELL_EVAL_STATS_TEST_LOCK, eval_shell_distance,
+        reset_shell_eval_stats, set_shell_eval_stats_enabled, shell_eval_stats,
     },
     types::{Grad, Interval},
     var::Var,
@@ -140,6 +140,7 @@ fn shell_vm_point_eval_matches_kernel() {
 
 #[test]
 fn shell_vm_float_slice_eval_matches_kernel() {
+    let _stats_guard = SHELL_EVAL_STATS_TEST_LOCK.lock().unwrap();
     let samples = [(1.0, 0.0, 0.0), (1.0, 1.25, 0.0), (3.0, 0.0, 0.0)];
     let shell = shell();
     let mut scratch = ShellEvalScratch::default();
@@ -168,15 +169,22 @@ fn shell_vm_float_slice_eval_matches_kernel() {
         args[tape.vars()[&Var::Z]][i] = z;
     }
 
+    set_shell_eval_stats_enabled(true);
+    reset_shell_eval_stats();
     let mut eval = VmFunction::new_float_slice_eval();
     let out = eval.eval(&tape, &args).unwrap();
     for (&actual, &expected) in out[0].iter().zip(&expected) {
         assert_approx_eq(actual, expected);
     }
+    let stats = shell_eval_stats();
+    set_shell_eval_stats_enabled(false);
+    assert_eq!(stats.float_slice_hot_loop_allocations, 0);
+    assert_eq!(stats.hot_loop_allocations, 0);
 }
 
 #[test]
 fn shell_vm_grad_slice_eval_returns_native_distance_and_gradient() {
+    let _stats_guard = SHELL_EVAL_STATS_TEST_LOCK.lock().unwrap();
     let (ctx, root) = import_tree(&shell_tree());
     let shape = VmFunction::new(&ctx, &[root]).unwrap();
     let tape = shape.grad_slice_tape(Default::default());
@@ -185,12 +193,18 @@ fn shell_vm_grad_slice_eval_returns_native_distance_and_gradient() {
     args[tape.vars()[&Var::Y]][0] = Grad::new(1.25, 0.0, 1.0, 0.0);
     args[tape.vars()[&Var::Z]][0] = Grad::new(0.0, 0.0, 0.0, 1.0);
 
+    set_shell_eval_stats_enabled(true);
+    reset_shell_eval_stats();
     let mut eval = VmFunction::new_grad_slice_eval();
     let out = eval.eval(&tape, &args).unwrap()[0][0];
 
     assert_approx_eq(out.v, 0.25);
     assert!(out.dx.abs() <= 1.0e-3, "unexpected dx={}", out.dx);
     assert!((out.dy - 1.0).abs() <= 1.0e-3, "unexpected dy={}", out.dy);
+    let stats = shell_eval_stats();
+    set_shell_eval_stats_enabled(false);
+    assert_eq!(stats.grad_slice_hot_loop_allocations, 0);
+    assert_eq!(stats.hot_loop_allocations, 0);
     assert!(out.dz.abs() <= 1.0e-3, "unexpected dz={}", out.dz);
 }
 
@@ -240,7 +254,8 @@ fn shell_simplification_preserves_shell_sidecar() {
 
 #[test]
 fn shell_interval_trace_simplifies_shell_sidecar_to_active_segment() {
-    let (ctx, root) = import_tree(&Tree::line_loft_shell(multi_segment_shell()));
+    let (ctx, root) =
+        import_tree(&Tree::line_loft_shell(multi_segment_shell()));
     let shape = VmFunction::new(&ctx, &[root]).unwrap();
     let tape = shape.interval_tape(Default::default());
     let mut args = vec![Interval::new(0.0, 0.0); tape.vars().len()];
@@ -250,14 +265,11 @@ fn shell_interval_trace_simplifies_shell_sidecar_to_active_segment() {
 
     let mut eval = VmFunction::new_interval_eval();
     let (_out, trace) = eval.eval(&tape, &args).unwrap();
-    let trace = trace.expect("shell active trace should request simplification");
+    let trace =
+        trace.expect("shell active trace should request simplification");
     assert!(trace.keep_simplified_shape());
     let simplified = shape
-        .simplify(
-            trace,
-            VmData::<255>::default(),
-            &mut Default::default(),
-        )
+        .simplify(trace, VmData::<255>::default(), &mut Default::default())
         .unwrap();
 
     let shell = simplified
@@ -299,6 +311,7 @@ fn shell_interval_trace_simplifies_shell_sidecar_to_active_segment() {
 
 #[test]
 fn profile_shell_vm_interval_does_not_emit_sidecar_trace() {
+    let _stats_guard = SHELL_EVAL_STATS_TEST_LOCK.lock().unwrap();
     let (ctx, root) = import_tree(&Tree::shell_hull(profile_shell()));
     let shape = VmFunction::new(&ctx, &[root]).unwrap();
     let tape = shape.interval_tape(Default::default());

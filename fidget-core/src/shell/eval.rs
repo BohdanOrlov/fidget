@@ -1,6 +1,7 @@
 //! Pure shell evaluation kernels.
 
 use std::{
+    cell::Cell,
     mem::MaybeUninit,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
@@ -197,6 +198,10 @@ struct ShellGradientSample {
 static PROFILE2D_CALLS: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_DISTANCE_CALLS: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_GRADIENT_CALLS: AtomicU64 = AtomicU64::new(0);
+static PROFILE2D_OUTER_DISTANCE_CALLS: AtomicU64 = AtomicU64::new(0);
+static PROFILE2D_INNER_DISTANCE_CALLS: AtomicU64 = AtomicU64::new(0);
+static PROFILE2D_OUTER_GRADIENT_CALLS: AtomicU64 = AtomicU64::new(0);
+static PROFILE2D_INNER_GRADIENT_CALLS: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_SEGMENT_TESTS: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_BEZIER_TESTS: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_FALLBACKS: AtomicU64 = AtomicU64::new(0);
@@ -223,13 +228,31 @@ static PROFILE2D_HERMITE_QUARTER_25_WINS: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_HERMITE_QUARTER_50_WINS: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_HERMITE_QUARTER_75_WINS: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_HERMITE_HEIGHT_WINS: AtomicU64 = AtomicU64::new(0);
+static PROFILE_SHELL_INTERVAL_TILES: AtomicU64 = AtomicU64::new(0);
+static PROFILE_SHELL_INTERVAL_REJECTED_TILES: AtomicU64 = AtomicU64::new(0);
+static PROFILE_SHELL_INTERVAL_ACTIVE_TILES: AtomicU64 = AtomicU64::new(0);
+static PROFILE_SHELL_INTERVAL_SINGLE_SEGMENT_TILES: AtomicU64 =
+    AtomicU64::new(0);
+static PROFILE_SHELL_INTERVAL_MULTI_SEGMENT_TILES: AtomicU64 =
+    AtomicU64::new(0);
+static PROFILE_SHELL_INTERVAL_ACTIVE_SEGMENT_SUM: AtomicU64 = AtomicU64::new(0);
 static INTERVAL_CALLS: AtomicU64 = AtomicU64::new(0);
 static INTERVAL_HOT_LOOP_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+static FLOAT_SLICE_HOT_LOOP_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+static GRAD_SLICE_HOT_LOOP_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 static SHELL_EVAL_STATS_ENABLED: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+    static PROFILE2D_OUTER_DISTANCE_BATCH_CALLS: Cell<u64> =
+        const { Cell::new(0) };
+}
 
 #[cfg(test)]
 pub(crate) static SHELL_EVAL_STATS_TEST_LOCK: std::sync::Mutex<()> =
     std::sync::Mutex::new(());
+#[cfg(test)]
+static SHELL_EVAL_STATS_OWNER: std::sync::Mutex<Option<std::thread::ThreadId>> =
+    std::sync::Mutex::new(None);
 
 /// Aggregated native shell evaluator counters.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -240,6 +263,14 @@ pub struct ShellEvalStats {
     pub profile2d_distance_calls: u64,
     /// 2D station-profile evaluator calls from gradient evaluation.
     pub profile2d_gradient_calls: u64,
+    /// Outer profile calls from regular distance evaluation.
+    pub profile2d_outer_distance_calls: u64,
+    /// Inner profile calls from regular distance evaluation.
+    pub profile2d_inner_distance_calls: u64,
+    /// Outer profile calls from gradient evaluation.
+    pub profile2d_outer_gradient_calls: u64,
+    /// Inner profile calls from gradient evaluation.
+    pub profile2d_inner_gradient_calls: u64,
     /// Profile boundary segment tests performed by the 2D evaluator.
     pub profile2d_segment_tests: u64,
     /// Quadratic profile edge closest-point tests.
@@ -290,10 +321,26 @@ pub struct ShellEvalStats {
     pub profile2d_hermite_quarter_75_wins: u64,
     /// Hermite refinements where the same-height seed produced the closest point.
     pub profile2d_hermite_height_wins: u64,
+    /// Profile-shell interval tiles tested before exact profile sampling.
+    pub profile_shell_interval_tiles: u64,
+    /// Profile-shell interval tiles rejected as strictly outside the shell.
+    pub profile_shell_interval_rejected_tiles: u64,
+    /// Profile-shell interval tiles that still straddle the shell.
+    pub profile_shell_interval_active_tiles: u64,
+    /// Active profile-shell interval tiles narrowed to one station segment.
+    pub profile_shell_interval_single_segment_tiles: u64,
+    /// Active profile-shell interval tiles spanning multiple station segments.
+    pub profile_shell_interval_multi_segment_tiles: u64,
+    /// Active profile-shell segment counts summed across active interval tiles.
+    pub profile_shell_interval_active_segment_sum: u64,
     /// Calls into the native shell interval evaluator.
     pub interval_calls: u64,
     /// Dynamic allocations in native shell interval hot loops.
     pub interval_hot_loop_allocations: u64,
+    /// Dynamic allocations in native shell float-slice hot loops.
+    pub float_slice_hot_loop_allocations: u64,
+    /// Dynamic allocations in native shell grad-slice hot loops.
+    pub grad_slice_hot_loop_allocations: u64,
     /// Dynamic allocations in all native shell hot loops.
     pub hot_loop_allocations: u64,
 }
@@ -301,6 +348,13 @@ pub struct ShellEvalStats {
 /// Enables or disables shell evaluator counters.
 pub fn set_shell_eval_stats_enabled(enabled: bool) {
     SHELL_EVAL_STATS_ENABLED.store(enabled, Ordering::Relaxed);
+    #[cfg(test)]
+    {
+        let mut owner = SHELL_EVAL_STATS_OWNER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *owner = enabled.then(|| std::thread::current().id());
+    }
 }
 
 /// Resets global native shell evaluator counters before a measured render.
@@ -308,6 +362,10 @@ pub fn reset_shell_eval_stats() {
     PROFILE2D_CALLS.store(0, Ordering::Relaxed);
     PROFILE2D_DISTANCE_CALLS.store(0, Ordering::Relaxed);
     PROFILE2D_GRADIENT_CALLS.store(0, Ordering::Relaxed);
+    PROFILE2D_OUTER_DISTANCE_CALLS.store(0, Ordering::Relaxed);
+    PROFILE2D_INNER_DISTANCE_CALLS.store(0, Ordering::Relaxed);
+    PROFILE2D_OUTER_GRADIENT_CALLS.store(0, Ordering::Relaxed);
+    PROFILE2D_INNER_GRADIENT_CALLS.store(0, Ordering::Relaxed);
     PROFILE2D_SEGMENT_TESTS.store(0, Ordering::Relaxed);
     PROFILE2D_BEZIER_TESTS.store(0, Ordering::Relaxed);
     PROFILE2D_FALLBACKS.store(0, Ordering::Relaxed);
@@ -333,19 +391,39 @@ pub fn reset_shell_eval_stats() {
     PROFILE2D_HERMITE_QUARTER_50_WINS.store(0, Ordering::Relaxed);
     PROFILE2D_HERMITE_QUARTER_75_WINS.store(0, Ordering::Relaxed);
     PROFILE2D_HERMITE_HEIGHT_WINS.store(0, Ordering::Relaxed);
+    PROFILE_SHELL_INTERVAL_TILES.store(0, Ordering::Relaxed);
+    PROFILE_SHELL_INTERVAL_REJECTED_TILES.store(0, Ordering::Relaxed);
+    PROFILE_SHELL_INTERVAL_ACTIVE_TILES.store(0, Ordering::Relaxed);
+    PROFILE_SHELL_INTERVAL_SINGLE_SEGMENT_TILES.store(0, Ordering::Relaxed);
+    PROFILE_SHELL_INTERVAL_MULTI_SEGMENT_TILES.store(0, Ordering::Relaxed);
+    PROFILE_SHELL_INTERVAL_ACTIVE_SEGMENT_SUM.store(0, Ordering::Relaxed);
     INTERVAL_CALLS.store(0, Ordering::Relaxed);
     INTERVAL_HOT_LOOP_ALLOCATIONS.store(0, Ordering::Relaxed);
+    FLOAT_SLICE_HOT_LOOP_ALLOCATIONS.store(0, Ordering::Relaxed);
+    GRAD_SLICE_HOT_LOOP_ALLOCATIONS.store(0, Ordering::Relaxed);
 }
 
 /// Reads global native shell evaluator counters.
 pub fn shell_eval_stats() -> ShellEvalStats {
     let interval_hot_loop_allocations =
         INTERVAL_HOT_LOOP_ALLOCATIONS.load(Ordering::Relaxed);
+    let float_slice_hot_loop_allocations =
+        FLOAT_SLICE_HOT_LOOP_ALLOCATIONS.load(Ordering::Relaxed);
+    let grad_slice_hot_loop_allocations =
+        GRAD_SLICE_HOT_LOOP_ALLOCATIONS.load(Ordering::Relaxed);
     ShellEvalStats {
         profile2d_calls: PROFILE2D_CALLS.load(Ordering::Relaxed),
         profile2d_distance_calls: PROFILE2D_DISTANCE_CALLS
             .load(Ordering::Relaxed),
         profile2d_gradient_calls: PROFILE2D_GRADIENT_CALLS
+            .load(Ordering::Relaxed),
+        profile2d_outer_distance_calls: PROFILE2D_OUTER_DISTANCE_CALLS
+            .load(Ordering::Relaxed),
+        profile2d_inner_distance_calls: PROFILE2D_INNER_DISTANCE_CALLS
+            .load(Ordering::Relaxed),
+        profile2d_outer_gradient_calls: PROFILE2D_OUTER_GRADIENT_CALLS
+            .load(Ordering::Relaxed),
+        profile2d_inner_gradient_calls: PROFILE2D_INNER_GRADIENT_CALLS
             .load(Ordering::Relaxed),
         profile2d_segment_tests: PROFILE2D_SEGMENT_TESTS
             .load(Ordering::Relaxed),
@@ -355,10 +433,8 @@ pub fn shell_eval_stats() -> ShellEvalStats {
             .load(Ordering::Relaxed),
         profile2d_edges_aabb_pruned: PROFILE2D_EDGES_AABB_PRUNED
             .load(Ordering::Relaxed),
-        profile2d_linear_edges: PROFILE2D_LINEAR_EDGES
-            .load(Ordering::Relaxed),
-        profile2d_smooth_edges: PROFILE2D_SMOOTH_EDGES
-            .load(Ordering::Relaxed),
+        profile2d_linear_edges: PROFILE2D_LINEAR_EDGES.load(Ordering::Relaxed),
+        profile2d_smooth_edges: PROFILE2D_SMOOTH_EDGES.load(Ordering::Relaxed),
         profile2d_endpoint_best_kept: PROFILE2D_ENDPOINT_BEST_KEPT
             .load(Ordering::Relaxed),
         profile2d_hermite_edges_refined: PROFILE2D_HERMITE_EDGES_REFINED
@@ -376,8 +452,7 @@ pub fn shell_eval_stats() -> ShellEvalStats {
         profile2d_hermite_iteration_4_attempts:
             PROFILE2D_HERMITE_ITERATION_4_ATTEMPTS.load(Ordering::Relaxed),
         profile2d_hermite_clamped_endpoint_attempts:
-            PROFILE2D_HERMITE_CLAMPED_ENDPOINT_ATTEMPTS
-                .load(Ordering::Relaxed),
+            PROFILE2D_HERMITE_CLAMPED_ENDPOINT_ATTEMPTS.load(Ordering::Relaxed),
         profile2d_hermite_duplicate_t_attempts:
             PROFILE2D_HERMITE_DUPLICATE_T_ATTEMPTS.load(Ordering::Relaxed),
         profile2d_hermite_distance_evaluations:
@@ -388,23 +463,75 @@ pub fn shell_eval_stats() -> ShellEvalStats {
             .load(Ordering::Relaxed),
         profile2d_hermite_quarter_wins: PROFILE2D_HERMITE_QUARTER_WINS
             .load(Ordering::Relaxed),
-        profile2d_hermite_quarter_25_wins:
-            PROFILE2D_HERMITE_QUARTER_25_WINS.load(Ordering::Relaxed),
-        profile2d_hermite_quarter_50_wins:
-            PROFILE2D_HERMITE_QUARTER_50_WINS.load(Ordering::Relaxed),
-        profile2d_hermite_quarter_75_wins:
-            PROFILE2D_HERMITE_QUARTER_75_WINS.load(Ordering::Relaxed),
+        profile2d_hermite_quarter_25_wins: PROFILE2D_HERMITE_QUARTER_25_WINS
+            .load(Ordering::Relaxed),
+        profile2d_hermite_quarter_50_wins: PROFILE2D_HERMITE_QUARTER_50_WINS
+            .load(Ordering::Relaxed),
+        profile2d_hermite_quarter_75_wins: PROFILE2D_HERMITE_QUARTER_75_WINS
+            .load(Ordering::Relaxed),
         profile2d_hermite_height_wins: PROFILE2D_HERMITE_HEIGHT_WINS
             .load(Ordering::Relaxed),
+        profile_shell_interval_tiles: PROFILE_SHELL_INTERVAL_TILES
+            .load(Ordering::Relaxed),
+        profile_shell_interval_rejected_tiles:
+            PROFILE_SHELL_INTERVAL_REJECTED_TILES.load(Ordering::Relaxed),
+        profile_shell_interval_active_tiles:
+            PROFILE_SHELL_INTERVAL_ACTIVE_TILES.load(Ordering::Relaxed),
+        profile_shell_interval_single_segment_tiles:
+            PROFILE_SHELL_INTERVAL_SINGLE_SEGMENT_TILES.load(Ordering::Relaxed),
+        profile_shell_interval_multi_segment_tiles:
+            PROFILE_SHELL_INTERVAL_MULTI_SEGMENT_TILES.load(Ordering::Relaxed),
+        profile_shell_interval_active_segment_sum:
+            PROFILE_SHELL_INTERVAL_ACTIVE_SEGMENT_SUM.load(Ordering::Relaxed),
         interval_calls: INTERVAL_CALLS.load(Ordering::Relaxed),
         interval_hot_loop_allocations,
-        hot_loop_allocations: interval_hot_loop_allocations,
+        float_slice_hot_loop_allocations,
+        grad_slice_hot_loop_allocations,
+        hot_loop_allocations: interval_hot_loop_allocations
+            + float_slice_hot_loop_allocations
+            + grad_slice_hot_loop_allocations,
     }
+}
+
+/// Resets thread-local outer-profile distance calls for one renderer batch.
+pub fn reset_profile2d_outer_distance_batch_calls() {
+    PROFILE2D_OUTER_DISTANCE_BATCH_CALLS.with(|calls| calls.set(0));
+}
+
+/// Reads thread-local outer-profile distance calls for one renderer batch.
+pub fn profile2d_outer_distance_batch_calls() -> u64 {
+    PROFILE2D_OUTER_DISTANCE_BATCH_CALLS.with(Cell::get)
 }
 
 pub(crate) fn record_shell_interval_call() {
     if shell_eval_stats_enabled() {
         INTERVAL_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn record_profile_shell_interval_tile(
+    active_segment_mask: u64,
+    segment_count: usize,
+) {
+    if shell_eval_stats_enabled() {
+        PROFILE_SHELL_INTERVAL_TILES.fetch_add(1, Ordering::Relaxed);
+        if active_segment_mask == 0 {
+            PROFILE_SHELL_INTERVAL_REJECTED_TILES
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            PROFILE_SHELL_INTERVAL_ACTIVE_TILES.fetch_add(1, Ordering::Relaxed);
+            PROFILE_SHELL_INTERVAL_ACTIVE_SEGMENT_SUM.fetch_add(
+                active_segment_mask.count_ones() as u64,
+                Ordering::Relaxed,
+            );
+            if active_segment_mask.count_ones() <= 1 || segment_count <= 1 {
+                PROFILE_SHELL_INTERVAL_SINGLE_SEGMENT_TILES
+                    .fetch_add(1, Ordering::Relaxed);
+            } else {
+                PROFILE_SHELL_INTERVAL_MULTI_SEGMENT_TILES
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
 }
 
@@ -414,16 +541,38 @@ enum Profile2dCallSource {
     Gradient,
 }
 
+#[derive(Clone, Copy)]
+enum Profile2dShellSide {
+    Outer,
+    Inner,
+}
+
 #[inline(always)]
-fn record_profile2d_call(source: Profile2dCallSource) {
+fn record_profile2d_call(
+    source: Profile2dCallSource,
+    side: Profile2dShellSide,
+) {
     if shell_eval_stats_enabled() {
         PROFILE2D_CALLS.fetch_add(1, Ordering::Relaxed);
-        match source {
-            Profile2dCallSource::Distance => {
+        match (source, side) {
+            (Profile2dCallSource::Distance, Profile2dShellSide::Outer) => {
                 PROFILE2D_DISTANCE_CALLS.fetch_add(1, Ordering::Relaxed);
+                PROFILE2D_OUTER_DISTANCE_CALLS.fetch_add(1, Ordering::Relaxed);
+                PROFILE2D_OUTER_DISTANCE_BATCH_CALLS.with(|calls| {
+                    calls.set(calls.get() + 1);
+                });
             }
-            Profile2dCallSource::Gradient => {
+            (Profile2dCallSource::Distance, Profile2dShellSide::Inner) => {
+                PROFILE2D_DISTANCE_CALLS.fetch_add(1, Ordering::Relaxed);
+                PROFILE2D_INNER_DISTANCE_CALLS.fetch_add(1, Ordering::Relaxed);
+            }
+            (Profile2dCallSource::Gradient, Profile2dShellSide::Outer) => {
                 PROFILE2D_GRADIENT_CALLS.fetch_add(1, Ordering::Relaxed);
+                PROFILE2D_OUTER_GRADIENT_CALLS.fetch_add(1, Ordering::Relaxed);
+            }
+            (Profile2dCallSource::Gradient, Profile2dShellSide::Inner) => {
+                PROFILE2D_GRADIENT_CALLS.fetch_add(1, Ordering::Relaxed);
+                PROFILE2D_INNER_GRADIENT_CALLS.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -681,14 +830,14 @@ fn eval_profile_shell_hull(
         scratch.collect_point_candidates(topology, ShellParamsView::empty(), x)
     {
         let segment = profile.segments[index.min(profile.segments.len() - 1)];
-        let outer = eval_profile_solid(
+        let outer = eval_profile_solid_outer(
             profile,
             segment,
-            0.0,
             x,
             y,
             z,
             Profile2dCallSource::Distance,
+            Profile2dShellSide::Outer,
         );
         let thickness = topology.shell_thickness.max(0.0);
         let distance = if thickness <= 1.0e-6 || outer > 0.0 {
@@ -702,6 +851,7 @@ fn eval_profile_shell_hull(
                 y,
                 z,
                 Profile2dCallSource::Distance,
+                Profile2dShellSide::Inner,
             );
             outer.max(-inner)
         };
@@ -735,13 +885,27 @@ fn eval_profile_shell_hull_gradient(
         scratch.collect_point_candidates(topology, ShellParamsView::empty(), x)
     {
         let segment = profile.segments[index.min(profile.segments.len() - 1)];
-        let outer = eval_profile_solid_gradient(profile, segment, 0.0, x, y, z);
+        let outer = eval_profile_solid_gradient(
+            profile,
+            segment,
+            0.0,
+            x,
+            y,
+            z,
+            Profile2dShellSide::Outer,
+        );
         let thickness = topology.shell_thickness.max(0.0);
         let sample = if thickness <= 1.0e-6 || outer.distance > 0.0 {
             outer
         } else {
             let inner = eval_profile_solid_gradient(
-                profile, segment, thickness, x, y, z,
+                profile,
+                segment,
+                thickness,
+                x,
+                y,
+                z,
+                Profile2dShellSide::Inner,
             );
             if outer.distance >= -inner.distance {
                 outer
@@ -770,14 +934,15 @@ fn eval_profile_shell_hull_gradient(
 }
 
 #[inline(always)]
-fn eval_profile_solid(
+#[allow(clippy::too_many_arguments)]
+fn eval_profile_solid_outer(
     profile: &ShellProfileTopology,
     segment: ShellProfileSegmentTopology,
-    inset: f32,
     x: f32,
     y: f32,
     z: f32,
     source: Profile2dCallSource,
+    side: Profile2dShellSide,
 ) -> f32 {
     let left = profile.sections[segment.left_section];
     let right = profile.sections[segment.right_section];
@@ -789,7 +954,38 @@ fn eval_profile_solid(
     };
 
     let section =
-        eval_profile_section_sdf(profile, segment, t, inset, y, z, source);
+        eval_profile_section_sdf_outer(profile, segment, t, y, z, source, side);
+    let first = profile.sections[0].station;
+    let last = profile.sections[profile.sections.len() - 1].station;
+    let left_cap = (first - profile.bow_cap_extension) - x;
+    let right_cap = x - (last + profile.stern_cap_extension);
+    section.max(left_cap.max(right_cap))
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn eval_profile_solid(
+    profile: &ShellProfileTopology,
+    segment: ShellProfileSegmentTopology,
+    inset: f32,
+    x: f32,
+    y: f32,
+    z: f32,
+    source: Profile2dCallSource,
+    side: Profile2dShellSide,
+) -> f32 {
+    let left = profile.sections[segment.left_section];
+    let right = profile.sections[segment.right_section];
+    let span = right.station - left.station;
+    let t = if span.abs() <= 1.0e-6 {
+        0.0
+    } else {
+        ((x - left.station) / span).clamp(0.0, 1.0)
+    };
+
+    let section = eval_profile_section_sdf(
+        profile, segment, t, inset, y, z, source, side,
+    );
     let first = profile.sections[0].station;
     let last = profile.sections[profile.sections.len() - 1].station;
     let left_cap = (first - profile.bow_cap_extension
@@ -809,6 +1005,7 @@ fn eval_profile_solid_gradient(
     x: f32,
     y: f32,
     z: f32,
+    side: Profile2dShellSide,
 ) -> ShellGradientSample {
     let left = profile.sections[segment.left_section];
     let right = profile.sections[segment.right_section];
@@ -819,8 +1016,9 @@ fn eval_profile_solid_gradient(
         ((x - left.station) / span).clamp(0.0, 1.0)
     };
 
-    let mut section =
-        eval_profile_section_sdf_gradient(profile, segment, t, inset, x, y, z);
+    let mut section = eval_profile_section_sdf_gradient(
+        profile, segment, t, inset, x, y, z, side,
+    );
     let first = profile.sections[0].station;
     let last = profile.sections[profile.sections.len() - 1].station;
     let left_cap = (first - profile.bow_cap_extension
@@ -867,6 +1065,36 @@ struct ProfileEdgeDistance {
 }
 
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn eval_profile_section_sdf_outer(
+    profile: &ShellProfileTopology,
+    segment: ShellProfileSegmentTopology,
+    t: f32,
+    y: f32,
+    z: f32,
+    source: Profile2dCallSource,
+    side: Profile2dShellSide,
+) -> f32 {
+    record_profile2d_call(source, side);
+    let mut nodes = [ProfileNodeSample {
+        half_width: 0.0,
+        z: 0.0,
+        continuity: ShellProfileNodeContinuity::Linear,
+    }; SHELL_MAX_NODES_PER_CURVE];
+    let sampled = sample_profile_nodes_outer(profile, segment, t, &mut nodes);
+
+    let y = y.abs();
+    let section = profile_section_distance(
+        [y, z],
+        &nodes[..sampled.node_count],
+        sampled.monotonic_in_z,
+    );
+    let distance = section.distance_sq.sqrt();
+    if section.inside { -distance } else { distance }
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn eval_profile_section_sdf(
     profile: &ShellProfileTopology,
     segment: ShellProfileSegmentTopology,
@@ -875,8 +1103,9 @@ fn eval_profile_section_sdf(
     y: f32,
     z: f32,
     source: Profile2dCallSource,
+    side: Profile2dShellSide,
 ) -> f32 {
-    record_profile2d_call(source);
+    record_profile2d_call(source, side);
     let mut nodes = [ProfileNodeSample {
         half_width: 0.0,
         z: 0.0,
@@ -895,6 +1124,7 @@ fn eval_profile_section_sdf(
 }
 
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn eval_profile_section_sdf_gradient(
     profile: &ShellProfileTopology,
     segment: ShellProfileSegmentTopology,
@@ -903,8 +1133,9 @@ fn eval_profile_section_sdf_gradient(
     x: f32,
     y: f32,
     z: f32,
+    side: Profile2dShellSide,
 ) -> ShellGradientSample {
-    record_profile2d_call(Profile2dCallSource::Gradient);
+    record_profile2d_call(Profile2dCallSource::Gradient, side);
     let mut nodes = [ProfileNodeSample {
         half_width: 0.0,
         z: 0.0,
@@ -939,6 +1170,7 @@ fn eval_profile_section_sdf_gradient(
         y,
         z,
         Profile2dCallSource::Gradient,
+        side,
     ) - eval_profile_solid(
         profile,
         segment,
@@ -947,13 +1179,72 @@ fn eval_profile_section_sdf_gradient(
         y,
         z,
         Profile2dCallSource::Gradient,
-    ))
-        / (2.0 * eps);
+        side,
+    )) / (2.0 * eps);
 
     ShellGradientSample {
         distance: sign * unsigned,
         segment: segment.left_section,
         gradient: [dx, sign * normal_y, sign * normal_z],
+    }
+}
+
+#[inline(always)]
+fn sample_profile_nodes_outer(
+    profile: &ShellProfileTopology,
+    segment: ShellProfileSegmentTopology,
+    t: f32,
+    out: &mut [ProfileNodeSample; SHELL_MAX_NODES_PER_CURVE],
+) -> ProfileNodeSampleSet {
+    let left = profile.sections[segment.left_section];
+    let right = profile.sections[segment.right_section];
+    let node_count = segment.node_count.max(2).min(out.len());
+    let mut nondecreasing = true;
+    let mut nonincreasing = true;
+    let mut previous_z = 0.0_f32;
+
+    for (node_index, out_node) in out.iter_mut().enumerate().take(node_count) {
+        let left_node = left.nodes[node_index.min(left.node_count - 1)];
+        let right_node = right.nodes[node_index.min(right.node_count - 1)];
+        let (half_width, z) = match segment.interpolation {
+            ShellProfileSpanInterpolation::Linear => (
+                lerp(left_node.half_width, right_node.half_width, t),
+                lerp(left_node.z, right_node.z, t),
+            ),
+            ShellProfileSpanInterpolation::SmoothCatmullRom => {
+                let node = segment.nodes[node_index];
+                (node.half_width.eval(t), node.z.eval(t))
+            }
+        };
+
+        let continuity = if left_node.continuity
+            == ShellProfileNodeContinuity::Linear
+            || right_node.continuity == ShellProfileNodeContinuity::Linear
+        {
+            ShellProfileNodeContinuity::Linear
+        } else {
+            ShellProfileNodeContinuity::Smooth
+        };
+
+        *out_node = ProfileNodeSample {
+            half_width: half_width.abs().max(0.0),
+            z,
+            continuity,
+        };
+        if node_index > 0 {
+            if z < previous_z {
+                nondecreasing = false;
+            }
+            if z > previous_z {
+                nonincreasing = false;
+            }
+        }
+        previous_z = z;
+    }
+
+    ProfileNodeSampleSet {
+        node_count,
+        monotonic_in_z: nondecreasing || nonincreasing,
     }
 }
 
@@ -1242,11 +1533,7 @@ fn profile_edge_distance_if_relevant(
         if stats_enabled {
             PROFILE2D_SEGMENT_TESTS.fetch_add(1, Ordering::Relaxed);
         }
-        distance_to_segment(
-            p,
-            [a.half_width, a.z],
-            [c.half_width, c.z],
-        )
+        distance_to_segment(p, [a.half_width, a.z], [c.half_width, c.z])
     } else {
         let hermite = ProfileHermiteEdge::new(a, c, a_slope, c_slope);
         if profile_edge_aabb_lower_bound_sq_for_hermite(p, a, c, hermite)
@@ -1257,8 +1544,7 @@ fn profile_edge_distance_if_relevant(
             }
             return best;
         }
-        if profile_edge_bezier_hull_cannot_beat(p, hermite, best.distance_sq)
-        {
+        if profile_edge_bezier_hull_cannot_beat(p, hermite, best.distance_sq) {
             return best;
         }
         if stats_enabled {
@@ -1438,7 +1724,6 @@ fn profile_endpoint_distance(
     best
 }
 
-#[inline(always)]
 fn profile_node_slopes(
     nodes: &[ProfileNodeSample],
     out: &mut [f32; SHELL_MAX_NODES_PER_CURVE],
@@ -1662,13 +1947,19 @@ fn profile_edge_bezier_controls(edge: ProfileHermiteEdge) -> [[f32; 2]; 4] {
     [
         [edge.c0, edge.z0],
         [edge.c0 + edge.c1 / 3.0, edge.z0 + edge.dz / 3.0],
-        [width_1 - derivative_1 / 3.0, edge.z0 + edge.dz * (2.0 / 3.0)],
+        [
+            width_1 - derivative_1 / 3.0,
+            edge.z0 + edge.dz * (2.0 / 3.0),
+        ],
         [width_1, edge.z0 + edge.dz],
     ]
 }
 
 #[inline(always)]
-fn distance_sq_to_control_frame_bounds(p: [f32; 2], controls: [[f32; 2]; 4]) -> f32 {
+fn distance_sq_to_control_frame_bounds(
+    p: [f32; 2],
+    controls: [[f32; 2]; 4],
+) -> f32 {
     let axis = [
         controls[3][0] - controls[0][0],
         controls[3][1] - controls[0][1],
@@ -1700,7 +1991,8 @@ fn distance_sq_to_control_frame_bounds(p: [f32; 2], controls: [[f32; 2]; 4]) -> 
     let mut normal_max = f32::NEG_INFINITY;
     for point in controls {
         let rel = [point[0] - controls[0][0], point[1] - controls[0][1]];
-        let tangent_projection = rel[0].mul_add(tangent[0], rel[1] * tangent[1]);
+        let tangent_projection =
+            rel[0].mul_add(tangent[0], rel[1] * tangent[1]);
         let normal_projection = rel[0].mul_add(normal[0], rel[1] * normal[1]);
         tangent_min = tangent_min.min(tangent_projection);
         tangent_max = tangent_max.max(tangent_projection);
@@ -1760,7 +2052,8 @@ fn distance_to_profile_hermite_edge(
         (0.75, HermiteSeedKind::Quarter75),
         (1.0, HermiteSeedKind::Endpoint),
     ] {
-        let (t, iterations) = refine_profile_hermite_closest_t(p, edge, candidate);
+        let (t, iterations) =
+            refine_profile_hermite_closest_t(p, edge, candidate);
         if stats_enabled {
             PROFILE2D_HERMITE_SEED_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
             PROFILE2D_HERMITE_NEWTON_ITERATIONS
@@ -1818,8 +2111,23 @@ fn distance_to_profile_hermite_edge(
     best
 }
 
-fn shell_eval_stats_enabled() -> bool {
-    SHELL_EVAL_STATS_ENABLED.load(Ordering::Relaxed)
+pub(crate) fn shell_eval_stats_enabled() -> bool {
+    if !SHELL_EVAL_STATS_ENABLED.load(Ordering::Relaxed) {
+        return false;
+    }
+    #[cfg(test)]
+    {
+        let owner = SHELL_EVAL_STATS_OWNER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        owner
+            .as_ref()
+            .is_some_and(|thread| *thread == std::thread::current().id())
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
 }
 
 #[inline(always)]
@@ -1927,8 +2235,7 @@ fn refine_profile_hermite_bracketed_root(
             hi_derivative = derivative;
         }
 
-        let second =
-            profile_hermite_distance_second_derivative(p, edge, t);
+        let second = profile_hermite_distance_second_derivative(p, edge, t);
         let newton = if second.abs() > 1.0e-8 {
             t - derivative / second
         } else {
@@ -2476,17 +2783,66 @@ mod tests {
             "edge type counters should account for every considered contour edge; stats={stats:?}",
         );
         assert!(
-            stats.profile2d_edges_aabb_pruned <= stats.profile2d_edges_considered,
+            stats.profile2d_edges_aabb_pruned
+                <= stats.profile2d_edges_considered,
             "AABB-pruned edges cannot exceed considered edges; stats={stats:?}",
         );
         assert!(
-            stats.profile2d_hermite_edges_refined <= stats.profile2d_smooth_edges,
+            stats.profile2d_hermite_edges_refined
+                <= stats.profile2d_smooth_edges,
             "Hermite refinements should only come from smooth edges; stats={stats:?}",
         );
         assert!(
             stats.profile2d_endpoint_best_kept <= stats.profile2d_calls,
             "endpoint-best calls cannot exceed profile calls; stats={stats:?}",
         );
+    }
+
+    #[test]
+    fn outer_profile_solid_matches_generic_zero_inset_path() {
+        let topology = ShellTopology::ship_profile_shell_hull(
+            [test_profile_section(0.0), test_profile_section(1.0)],
+            0.0,
+            OpenTopPolicy::Closed,
+        );
+        let profile = topology.profile.as_ref().unwrap();
+        let segment = profile.segments[0];
+
+        for x_step in 0..=8 {
+            for y_step in 0..=8 {
+                for z_step in 0..=12 {
+                    let x = x_step as f32 * 0.125;
+                    let y = y_step as f32 * 0.08;
+                    let z = -0.45 + z_step as f32 * 0.10;
+                    let generic = eval_profile_solid(
+                        profile,
+                        segment,
+                        0.0,
+                        x,
+                        y,
+                        z,
+                        Profile2dCallSource::Distance,
+                        Profile2dShellSide::Outer,
+                    );
+                    let outer = eval_profile_solid_outer(
+                        profile,
+                        segment,
+                        x,
+                        y,
+                        z,
+                        Profile2dCallSource::Distance,
+                        Profile2dShellSide::Outer,
+                    );
+
+                    assert_eq!(
+                        outer,
+                        generic,
+                        "outer-specialized profile path changed distance at {:?}",
+                        (x, y, z),
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -2503,16 +2859,18 @@ mod tests {
             {
                 continue;
             }
-            let (a_slope, c_slope) =
-                profile_effective_edge_slopes(a, c, slopes[edge_index], slopes[edge_index + 1]);
+            let (a_slope, c_slope) = profile_effective_edge_slopes(
+                a,
+                c,
+                slopes[edge_index],
+                slopes[edge_index + 1],
+            );
             let edge = ProfileHermiteEdge::new(a, c, a_slope, c_slope);
 
             for y_step in 0..=14 {
                 for z_step in 0..=24 {
-                    let p = [
-                        y_step as f32 * 0.05,
-                        -0.50 + z_step as f32 * 0.055,
-                    ];
+                    let p =
+                        [y_step as f32 * 0.05, -0.50 + z_step as f32 * 0.055];
                     let full =
                         distance_to_profile_hermite_edge(p, a, c, edge, false);
                     let reduced =
@@ -2520,7 +2878,8 @@ mod tests {
                             p, a, c, edge,
                         );
                     assert!(
-                        (full.distance_sq - reduced.distance_sq).abs() <= 1.0e-6,
+                        (full.distance_sq - reduced.distance_sq).abs()
+                            <= 1.0e-6,
                         "reduced Hermite seeds changed distance on edge {edge_index} at {p:?}: full={full:?} reduced={reduced:?}",
                     );
                 }
@@ -2545,16 +2904,18 @@ mod tests {
             {
                 continue;
             }
-            let (a_slope, c_slope) =
-                profile_effective_edge_slopes(a, c, slopes[edge_index], slopes[edge_index + 1]);
+            let (a_slope, c_slope) = profile_effective_edge_slopes(
+                a,
+                c,
+                slopes[edge_index],
+                slopes[edge_index + 1],
+            );
             let edge = ProfileHermiteEdge::new(a, c, a_slope, c_slope);
 
             for y_step in 0..=14 {
                 for z_step in 0..=24 {
-                    let p = [
-                        y_step as f32 * 0.05,
-                        -0.50 + z_step as f32 * 0.055,
-                    ];
+                    let p =
+                        [y_step as f32 * 0.05, -0.50 + z_step as f32 * 0.055];
                     let full =
                         distance_to_profile_hermite_edge(p, a, c, edge, false);
                     let without_025 =
@@ -2570,11 +2931,14 @@ mod tests {
                             p, a, c, edge, 0.75,
                         );
                     changed_without_025 |=
-                        (full.distance_sq - without_025.distance_sq).abs() > 1.0e-6;
+                        (full.distance_sq - without_025.distance_sq).abs()
+                            > 1.0e-6;
                     changed_without_050 |=
-                        (full.distance_sq - without_050.distance_sq).abs() > 1.0e-6;
+                        (full.distance_sq - without_050.distance_sq).abs()
+                            > 1.0e-6;
                     changed_without_075 |=
-                        (full.distance_sq - without_075.distance_sq).abs() > 1.0e-6;
+                        (full.distance_sq - without_075.distance_sq).abs()
+                            > 1.0e-6;
                 }
             }
         }
@@ -2608,22 +2972,27 @@ mod tests {
             {
                 continue;
             }
-            let (a_slope, c_slope) =
-                profile_effective_edge_slopes(a, c, slopes[edge_index], slopes[edge_index + 1]);
+            let (a_slope, c_slope) = profile_effective_edge_slopes(
+                a,
+                c,
+                slopes[edge_index],
+                slopes[edge_index + 1],
+            );
             let edge = ProfileHermiteEdge::new(a, c, a_slope, c_slope);
 
             for y_step in 0..=18 {
                 for z_step in 0..=32 {
-                    let p = [
-                        y_step as f32 * 0.045,
-                        -0.65 + z_step as f32 * 0.05,
-                    ];
+                    let p =
+                        [y_step as f32 * 0.045, -0.65 + z_step as f32 * 0.05];
                     let current =
                         distance_to_profile_hermite_edge(p, a, c, edge, false);
                     let bracketed =
-                        distance_to_profile_hermite_edge_bracketed_for_test(p, a, c, edge);
-                    let changed =
-                        (current.distance_sq - bracketed.distance_sq).abs() > 1.0e-6;
+                        distance_to_profile_hermite_edge_bracketed_for_test(
+                            p, a, c, edge,
+                        );
+                    let changed = (current.distance_sq - bracketed.distance_sq)
+                        .abs()
+                        > 1.0e-6;
                     if changed {
                         changed_any_distance = true;
                     }
@@ -2762,6 +3131,99 @@ mod tests {
             grad_stats.profile2d_gradient_calls >= 1,
             "gradient eval should attribute profile-section calls to the gradient path; stats={grad_stats:?}",
         );
+    }
+
+    #[test]
+    fn profile2d_attributes_outer_and_inner_shell_calls() {
+        let _lock = SHELL_EVAL_STATS_TEST_LOCK
+            .lock()
+            .expect("stats lock should not be poisoned");
+        let topology = ShellTopology::ship_profile_shell_hull(
+            [test_profile_section(0.0), test_profile_section(1.0)],
+            0.08,
+            OpenTopPolicy::Closed,
+        );
+        let mut scratch = ShellEvalScratch::default();
+
+        set_shell_eval_stats_enabled(true);
+        reset_shell_eval_stats();
+        let distance = eval_shell_distance(
+            &topology,
+            ShellParamsView::empty(),
+            &mut scratch,
+            0.50,
+            0.20,
+            0.10,
+        );
+        let distance_stats = shell_eval_stats();
+        reset_shell_eval_stats();
+        let grad = eval_shell_grad(
+            &topology,
+            ShellParamsView::empty(),
+            &mut scratch,
+            Grad::new(0.50, 1.0, 0.0, 0.0),
+            Grad::new(0.20, 0.0, 1.0, 0.0),
+            Grad::new(0.10, 0.0, 0.0, 1.0),
+        );
+        let grad_stats = shell_eval_stats();
+        set_shell_eval_stats_enabled(false);
+
+        assert!(distance.distance.is_finite());
+        assert!(grad.v.is_finite());
+        assert_eq!(
+            distance_stats.profile2d_distance_calls,
+            distance_stats.profile2d_outer_distance_calls
+                + distance_stats.profile2d_inner_distance_calls,
+            "distance outer/inner split should account for all distance profile calls; stats={distance_stats:?}",
+        );
+        assert_eq!(distance_stats.profile2d_outer_distance_calls, 1);
+        assert_eq!(distance_stats.profile2d_inner_distance_calls, 1);
+        assert_eq!(
+            grad_stats.profile2d_gradient_calls,
+            grad_stats.profile2d_outer_gradient_calls
+                + grad_stats.profile2d_inner_gradient_calls,
+            "gradient outer/inner split should account for all gradient profile calls; stats={grad_stats:?}",
+        );
+        assert!(
+            grad_stats.profile2d_outer_gradient_calls > 0,
+            "gradient eval should record outer profile calls; stats={grad_stats:?}",
+        );
+        assert!(
+            grad_stats.profile2d_inner_gradient_calls > 0,
+            "gradient eval should record inner profile calls; stats={grad_stats:?}",
+        );
+    }
+
+    #[test]
+    fn profile2d_records_outer_distance_calls_in_thread_local_batch() {
+        let _lock = SHELL_EVAL_STATS_TEST_LOCK
+            .lock()
+            .expect("stats lock should not be poisoned");
+        let topology = ShellTopology::ship_profile_shell_hull(
+            [test_profile_section(0.0), test_profile_section(1.0)],
+            0.0,
+            OpenTopPolicy::Closed,
+        );
+        let mut scratch = ShellEvalScratch::default();
+
+        set_shell_eval_stats_enabled(true);
+        reset_shell_eval_stats();
+        reset_profile2d_outer_distance_batch_calls();
+        let sample = eval_shell_distance(
+            &topology,
+            ShellParamsView::empty(),
+            &mut scratch,
+            0.50,
+            0.50,
+            0.19,
+        );
+        let batch_calls = profile2d_outer_distance_batch_calls();
+        let stats = shell_eval_stats();
+        set_shell_eval_stats_enabled(false);
+
+        assert!(sample.distance.is_finite());
+        assert_eq!(batch_calls, stats.profile2d_outer_distance_calls);
+        assert_eq!(batch_calls, 1);
     }
 
     fn test_profile_section(station: f32) -> ShellProfileSectionTopology {

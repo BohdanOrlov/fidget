@@ -40,6 +40,12 @@ impl ShellBounds {
         self.max_z = self.max_z.max(z);
     }
 
+    /// Expands the bounds to include another bounds box.
+    pub fn include_bounds(&mut self, other: ShellBounds) {
+        self.include_point(other.min_x, other.min_y, other.min_z);
+        self.include_point(other.max_x, other.max_y, other.max_z);
+    }
+
     /// Expands the bounds uniformly in every direction.
     pub fn inflate(self, amount: f32) -> Self {
         let amount = amount.max(0.0);

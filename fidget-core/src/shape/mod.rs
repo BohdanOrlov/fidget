@@ -32,6 +32,7 @@ use crate::{
         BulkEvalError, BulkEvaluator, Function, MathFunction, Tape,
         TracingEvalError, TracingEvaluator,
     },
+    render::NativeRenderMetadata,
     types::{Grad, Interval},
     var::{BadVarSlice, BulkArgError, TracingArgError, Var, VarIndex, VarMap},
     vm::BadTrace,
@@ -217,6 +218,12 @@ impl<F: Function + Clone, T> Shape<F, T> {
     #[inline]
     pub fn size(&self) -> usize {
         self.f.size()
+    }
+
+    /// Returns optional native metadata for render pruning.
+    #[inline]
+    pub fn native_render_metadata(&self) -> Option<NativeRenderMetadata> {
+        self.f.native_render_metadata()
     }
 }
 

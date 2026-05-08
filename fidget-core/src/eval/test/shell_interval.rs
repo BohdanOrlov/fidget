@@ -4,8 +4,9 @@ use crate::{
     context::{Context, Tree},
     eval::{Function, MathFunction, Tape, TracingEvaluator},
     shell::{
-        OpenTopPolicy, ShellEvalScratch, ShellParamsView, ShellSectionTopology,
-        ShellProfileSectionTopology, ShellTopology, eval_shell_distance,
+        OpenTopPolicy, ShellEvalScratch, ShellParamsView,
+        ShellProfileSectionTopology, ShellSectionTopology, ShellTopology,
+        eval::SHELL_EVAL_STATS_TEST_LOCK, eval_shell_distance,
         eval_shell_interval, eval_shell_interval_with_trace,
         reset_shell_eval_stats, set_shell_eval_stats_enabled, shell_eval_stats,
     },
@@ -148,8 +149,7 @@ fn shell_interval_trace_records_local_active_segment_mask() {
     assert_eq!(interval.upper(), f32::INFINITY);
     assert_eq!(trace.segment_count, 3);
     assert_eq!(
-        trace.active_segment_mask,
-        0b010,
+        trace.active_segment_mask, 0b010,
         "tile inside the middle station span should only keep that span active"
     );
     assert!(
@@ -160,6 +160,7 @@ fn shell_interval_trace_records_local_active_segment_mask() {
 
 #[test]
 fn profile_shell_interval_trace_records_local_active_segment_mask() {
+    let _stats_guard = SHELL_EVAL_STATS_TEST_LOCK.lock().unwrap();
     let topology = ShellTopology::ship_profile_shell_hull(
         vec![
             ShellProfileSectionTopology::ship(0.0, -0.4, 0.7, 0.6),
@@ -183,8 +184,7 @@ fn profile_shell_interval_trace_records_local_active_segment_mask() {
     assert_eq!(interval.upper(), f32::INFINITY);
     assert_eq!(trace.segment_count, 3);
     assert_eq!(
-        trace.active_segment_mask,
-        0b010,
+        trace.active_segment_mask, 0b010,
         "profile tile inside the middle station span should only keep that span active"
     );
     assert!(
@@ -195,7 +195,7 @@ fn profile_shell_interval_trace_records_local_active_segment_mask() {
 
 #[test]
 fn shell_interval_stats_assert_no_hot_loop_allocations() {
-    let _stats_guard = super::SHELL_EVAL_STATS_TEST_LOCK.lock().unwrap();
+    let _stats_guard = SHELL_EVAL_STATS_TEST_LOCK.lock().unwrap();
     let topology = ShellTopology::shell_hull_circles(
         vec![
             ShellSectionTopology::circle(0.0, 0.0, 0.0, 1.0),
@@ -233,5 +233,7 @@ fn shell_interval_stats_assert_no_hot_loop_allocations() {
         stats.interval_calls
     );
     assert_eq!(stats.interval_hot_loop_allocations, 0);
+    assert_eq!(stats.float_slice_hot_loop_allocations, 0);
+    assert_eq!(stats.grad_slice_hot_loop_allocations, 0);
     assert_eq!(stats.hot_loop_allocations, 0);
 }
