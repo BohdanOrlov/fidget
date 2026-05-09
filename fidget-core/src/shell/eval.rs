@@ -254,6 +254,18 @@ static INTERVAL_CALLS: AtomicU64 = AtomicU64::new(0);
 static INTERVAL_HOT_LOOP_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 static FLOAT_SLICE_HOT_LOOP_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 static GRAD_SLICE_HOT_LOOP_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+static JIT_SHELL_HELPER_CALLS: AtomicU64 = AtomicU64::new(0);
+static JIT_SHELL_HELPER_LANES: AtomicU64 = AtomicU64::new(0);
+static JIT_SHELL_POINT_HELPER_CALLS: AtomicU64 = AtomicU64::new(0);
+static JIT_SHELL_FLOAT4_HELPER_CALLS: AtomicU64 = AtomicU64::new(0);
+static JIT_SHELL_FLOAT4_HELPER_LANES: AtomicU64 = AtomicU64::new(0);
+static JIT_SHELL_INTERVAL_HELPER_CALLS: AtomicU64 = AtomicU64::new(0);
+static JIT_SHELL_GRAD_HELPER_CALLS: AtomicU64 = AtomicU64::new(0);
+static JIT_SHELL_FIXED_TOPOLOGY_HELPER_CANDIDATE_CALLS: AtomicU64 =
+    AtomicU64::new(0);
+static JIT_SHELL_FIXED_TOPOLOGY_HELPER_CANDIDATE_LANES: AtomicU64 =
+    AtomicU64::new(0);
+
 static SHELL_EVAL_STATS_ENABLED: AtomicBool = AtomicBool::new(false);
 
 const JIT_SHELL_FLOAT4_LANES: u64 = 4;
@@ -281,6 +293,64 @@ pub(crate) static SHELL_EVAL_STATS_TEST_LOCK: std::sync::Mutex<()> =
 #[cfg(test)]
 static SHELL_EVAL_STATS_OWNER: std::sync::Mutex<Option<std::thread::ThreadId>> =
     std::sync::Mutex::new(None);
+
+/// JIT native shell helper family used for helper-overhead measurement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShellJitHelperKind {
+    /// Scalar point helper.
+    Point,
+    /// Four-distance packet helper used by float-slice JIT.
+    Float4,
+    /// Interval helper.
+    Interval,
+    /// Gradient helper.
+    Grad,
+}
+
+impl ShellJitHelperKind {
+    fn lanes(self) -> u64 {
+        match self {
+            Self::Float4 => 4,
+            Self::Point | Self::Interval | Self::Grad => 1,
+        }
+    }
+}
+
+/// Records one JIT shell helper crossing when shell stats are enabled.
+pub fn record_jit_shell_helper_call(
+    kind: ShellJitHelperKind,
+    topology: &ShellTopology,
+) {
+    if !shell_eval_stats_enabled() {
+        return;
+    }
+
+    let lanes = kind.lanes();
+    JIT_SHELL_HELPER_CALLS.fetch_add(1, Ordering::Relaxed);
+    JIT_SHELL_HELPER_LANES.fetch_add(lanes, Ordering::Relaxed);
+    match kind {
+        ShellJitHelperKind::Point => {
+            JIT_SHELL_POINT_HELPER_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+        ShellJitHelperKind::Float4 => {
+            JIT_SHELL_FLOAT4_HELPER_CALLS.fetch_add(1, Ordering::Relaxed);
+            JIT_SHELL_FLOAT4_HELPER_LANES.fetch_add(lanes, Ordering::Relaxed);
+        }
+        ShellJitHelperKind::Interval => {
+            JIT_SHELL_INTERVAL_HELPER_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+        ShellJitHelperKind::Grad => {
+            JIT_SHELL_GRAD_HELPER_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    if topology.fixed_topology_helper_kind().is_some() {
+        JIT_SHELL_FIXED_TOPOLOGY_HELPER_CANDIDATE_CALLS
+            .fetch_add(1, Ordering::Relaxed);
+        JIT_SHELL_FIXED_TOPOLOGY_HELPER_CANDIDATE_LANES
+            .fetch_add(lanes, Ordering::Relaxed);
+    }
+}
 
 /// Aggregated native shell evaluator counters.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -389,6 +459,25 @@ pub struct ShellEvalStats {
     pub profile_shell_interval_active_segment_sum: u64,
     /// Calls into the native shell interval evaluator.
     pub interval_calls: u64,
+    /// JIT native shell helper calls crossing the Rust helper ABI.
+    pub jit_shell_helper_calls: u64,
+    /// Logical sample lanes processed by JIT native shell helpers.
+    pub jit_shell_helper_lanes: u64,
+    /// Scalar point JIT native shell helper calls.
+    pub jit_shell_point_helper_calls: u64,
+    /// Four-lane float-slice JIT native shell helper calls.
+    pub jit_shell_float4_helper_calls: u64,
+    /// Logical sample lanes processed by float4 JIT native shell helpers.
+    pub jit_shell_float4_helper_lanes: u64,
+    /// Interval JIT native shell helper calls.
+    pub jit_shell_interval_helper_calls: u64,
+    /// Gradient JIT native shell helper calls.
+    pub jit_shell_grad_helper_calls: u64,
+    /// Helper calls whose topology matches the fixed-topology specialization stub.
+    pub jit_shell_fixed_topology_helper_candidate_calls: u64,
+    /// Helper lanes whose topology matches the fixed-topology specialization stub.
+    pub jit_shell_fixed_topology_helper_candidate_lanes: u64,
+
     /// Dynamic allocations in native shell interval hot loops.
     pub interval_hot_loop_allocations: u64,
     /// Dynamic allocations in native shell float-slice hot loops.
@@ -468,6 +557,15 @@ pub fn reset_shell_eval_stats() {
     INTERVAL_HOT_LOOP_ALLOCATIONS.store(0, Ordering::Relaxed);
     FLOAT_SLICE_HOT_LOOP_ALLOCATIONS.store(0, Ordering::Relaxed);
     GRAD_SLICE_HOT_LOOP_ALLOCATIONS.store(0, Ordering::Relaxed);
+    JIT_SHELL_HELPER_CALLS.store(0, Ordering::Relaxed);
+    JIT_SHELL_HELPER_LANES.store(0, Ordering::Relaxed);
+    JIT_SHELL_POINT_HELPER_CALLS.store(0, Ordering::Relaxed);
+    JIT_SHELL_FLOAT4_HELPER_CALLS.store(0, Ordering::Relaxed);
+    JIT_SHELL_FLOAT4_HELPER_LANES.store(0, Ordering::Relaxed);
+    JIT_SHELL_INTERVAL_HELPER_CALLS.store(0, Ordering::Relaxed);
+    JIT_SHELL_GRAD_HELPER_CALLS.store(0, Ordering::Relaxed);
+    JIT_SHELL_FIXED_TOPOLOGY_HELPER_CANDIDATE_CALLS.store(0, Ordering::Relaxed);
+    JIT_SHELL_FIXED_TOPOLOGY_HELPER_CANDIDATE_LANES.store(0, Ordering::Relaxed);
 }
 
 /// Reads global native shell evaluator counters.
@@ -577,6 +675,25 @@ pub fn shell_eval_stats() -> ShellEvalStats {
         profile_shell_interval_active_segment_sum:
             PROFILE_SHELL_INTERVAL_ACTIVE_SEGMENT_SUM.load(Ordering::Relaxed),
         interval_calls: INTERVAL_CALLS.load(Ordering::Relaxed),
+        jit_shell_helper_calls: JIT_SHELL_HELPER_CALLS.load(Ordering::Relaxed),
+        jit_shell_helper_lanes: JIT_SHELL_HELPER_LANES.load(Ordering::Relaxed),
+        jit_shell_point_helper_calls: JIT_SHELL_POINT_HELPER_CALLS
+            .load(Ordering::Relaxed),
+        jit_shell_float4_helper_calls: JIT_SHELL_FLOAT4_HELPER_CALLS
+            .load(Ordering::Relaxed),
+        jit_shell_float4_helper_lanes: JIT_SHELL_FLOAT4_HELPER_LANES
+            .load(Ordering::Relaxed),
+        jit_shell_interval_helper_calls: JIT_SHELL_INTERVAL_HELPER_CALLS
+            .load(Ordering::Relaxed),
+        jit_shell_grad_helper_calls: JIT_SHELL_GRAD_HELPER_CALLS
+            .load(Ordering::Relaxed),
+        jit_shell_fixed_topology_helper_candidate_calls:
+            JIT_SHELL_FIXED_TOPOLOGY_HELPER_CANDIDATE_CALLS
+                .load(Ordering::Relaxed),
+        jit_shell_fixed_topology_helper_candidate_lanes:
+            JIT_SHELL_FIXED_TOPOLOGY_HELPER_CANDIDATE_LANES
+                .load(Ordering::Relaxed),
+
         interval_hot_loop_allocations,
         float_slice_hot_loop_allocations,
         grad_slice_hot_loop_allocations,
@@ -1841,12 +1958,12 @@ fn sample_profile_nodes_outer_packet4(
 ) -> [ProfileNodeSampleSet; 4] {
     let left = profile.sections[segment.left_section];
     let right = profile.sections[segment.right_section];
-    let node_count = segment.node_count.max(2).min(SHELL_MAX_NODES_PER_CURVE);
+    let node_count = segment.node_count.clamp(2, SHELL_MAX_NODES_PER_CURVE);
     let mut nondecreasing = [true; 4];
     let mut nonincreasing = [true; 4];
     let mut previous_z = [0.0_f32; 4];
 
-    for node_index in 0..node_count {
+    for (node_index, _) in segment.nodes.iter().enumerate().take(node_count) {
         let left_node = left.nodes[node_index.min(left.node_count - 1)];
         let right_node = right.nodes[node_index.min(right.node_count - 1)];
         let continuity = if left_node.continuity
@@ -1917,14 +2034,14 @@ fn sample_profile_nodes_packet4(
 ) -> [ProfileNodeSampleSet; 4] {
     let left = profile.sections[segment.left_section];
     let right = profile.sections[segment.right_section];
-    let node_count = segment.node_count.max(2).min(SHELL_MAX_NODES_PER_CURVE);
+    let node_count = segment.node_count.clamp(2, SHELL_MAX_NODES_PER_CURVE);
     let inset = inset.max(0.0);
     let mut max_half_width = [0.0_f32; 4];
     let mut nondecreasing = [true; 4];
     let mut nonincreasing = [true; 4];
     let mut previous_z = [0.0_f32; 4];
 
-    for node_index in 0..node_count {
+    for (node_index, _) in segment.nodes.iter().enumerate().take(node_count) {
         let left_node = left.nodes[node_index.min(left.node_count - 1)];
         let right_node = right.nodes[node_index.min(right.node_count - 1)];
         let continuity = if left_node.continuity
@@ -1988,7 +2105,8 @@ fn sample_profile_nodes_packet4(
             };
         }
 
-        for node_index in 0..node_count {
+        for (node_index, _) in segment.nodes.iter().enumerate().take(node_count)
+        {
             for lane in 0..4 {
                 let node = &mut out[lane][node_index];
                 node.half_width *= width_scale[lane];

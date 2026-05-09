@@ -12,9 +12,9 @@ pub mod topology;
 
 pub use bounds::ShellBounds;
 pub use eval::{
-    ShellEvalScratch, ShellEvalStats, ShellSample, eval_shell_distance,
-    eval_shell_distance4, eval_shell_grad,
-    profile2d_outer_distance_batch_calls,
+    ShellEvalScratch, ShellEvalStats, ShellJitHelperKind, ShellSample,
+    eval_shell_distance, eval_shell_distance4, eval_shell_grad,
+    profile2d_outer_distance_batch_calls, record_jit_shell_helper_call,
     reset_profile2d_outer_distance_batch_calls, reset_shell_eval_stats,
     set_shell_eval_stats_enabled, shell_eval_stats,
 };
@@ -24,9 +24,10 @@ pub use interval::{
 pub use params::{ShellParamLayout, ShellParamsView};
 pub use topology::{
     OpenTopPolicy, SHELL_MAX_CANDIDATES, SHELL_MAX_CURVES,
-    SHELL_MAX_NODES_PER_CURVE, ShellCubicCoefficients, ShellOpKind,
-    ShellProfileNodeContinuity, ShellProfileNodeTopology,
-    ShellProfileSectionTopology, ShellProfileSegmentTopology,
-    ShellProfileSpanInterpolation, ShellProfileTopology, ShellSectionTopology,
-    ShellSegmentInterpolation, ShellSegmentTopology, ShellTopology,
+    SHELL_MAX_NODES_PER_CURVE, ShellCubicCoefficients,
+    ShellFixedTopologyHelperKind, ShellOpKind, ShellProfileNodeContinuity,
+    ShellProfileNodeTopology, ShellProfileSectionTopology,
+    ShellProfileSegmentTopology, ShellProfileSpanInterpolation,
+    ShellProfileTopology, ShellSectionTopology, ShellSegmentInterpolation,
+    ShellSegmentTopology, ShellTopology,
 };

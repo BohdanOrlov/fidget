@@ -455,6 +455,14 @@ pub struct ShellProfileTopology {
     pub cap_inset_scale: f32,
 }
 
+/// Fixed-topology helper shape that can be targeted by future monomorphic JIT
+/// shell helpers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShellFixedTopologyHelperKind {
+    /// Static ship-profile shell hull with no live shell parameters.
+    ShipProfileShellHull,
+}
+
 /// Immutable native shell topology.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShellTopology {
@@ -621,6 +629,44 @@ impl ShellTopology {
             })
             .collect::<Vec<_>>()
             .into_boxed_slice()
+    }
+
+    /// Returns the fixed helper family this topology can use, if any.
+    ///
+    /// This is intentionally only a measurement/stub hook for now; it lets the
+    /// renderer report how many helper calls could plausibly avoid generic
+    /// sidecar dispatch and topology decoding before full codegen exists.
+    pub fn fixed_topology_helper_kind(
+        &self,
+    ) -> Option<ShellFixedTopologyHelperKind> {
+        if self.kind != ShellOpKind::ShellHull
+            || self.param_layout.parameter_count != 0
+            || self.station_mapping == ShellStationMapping::Unordered
+        {
+            return None;
+        }
+
+        let profile = self.profile.as_ref()?;
+        if profile.sections.len() != self.sections.len()
+            || profile.segments.len() != self.segments.len()
+            || profile.segments.is_empty()
+        {
+            return None;
+        }
+
+        let profile_sections_are_static_ship = profile
+            .sections
+            .iter()
+            .all(|section| section.ship_fast_path && section.node_count == 7);
+        let profile_segments_are_static_ship =
+            profile.segments.iter().all(|segment| {
+                segment.ship_fast_path
+                    && segment.node_count == 7
+                    && segment.right_section == segment.left_section + 1
+            });
+
+        (profile_sections_are_static_ship && profile_segments_are_static_ship)
+            .then_some(ShellFixedTopologyHelperKind::ShipProfileShellHull)
     }
 }
 

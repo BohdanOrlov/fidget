@@ -1,12 +1,12 @@
 use std::sync::MutexGuard;
 
 use crate::shell::{
-    OpenTopPolicy, SHELL_MAX_CANDIDATES, ShellEvalScratch, ShellParamsView,
-    ShellProfileNodeContinuity, ShellProfileNodeTopology,
-    ShellProfileSectionTopology, ShellProfileSpanInterpolation,
-    ShellSectionTopology, ShellTopology, eval::SHELL_EVAL_STATS_TEST_LOCK,
-    eval_shell_distance, reset_shell_eval_stats, set_shell_eval_stats_enabled,
-    shell_eval_stats,
+    OpenTopPolicy, SHELL_MAX_CANDIDATES, ShellEvalScratch,
+    ShellFixedTopologyHelperKind, ShellParamsView, ShellProfileNodeContinuity,
+    ShellProfileNodeTopology, ShellProfileSectionTopology,
+    ShellProfileSpanInterpolation, ShellSectionTopology, ShellTopology,
+    eval::SHELL_EVAL_STATS_TEST_LOCK, eval_shell_distance,
+    reset_shell_eval_stats, set_shell_eval_stats_enabled, shell_eval_stats,
 };
 
 fn shell_eval_stats_test_guard() -> MutexGuard<'static, ()> {
@@ -308,6 +308,58 @@ fn built_in_ship_profile_uses_whole_station_curve_evaluator() {
         assert_approx_eq(sample(&built_in, x, y, z), sample(&generic, x, y, z));
     }
 }
+
+#[test]
+fn ship_profile_shell_reports_fixed_topology_helper_candidate() {
+    let topology = ShellTopology::ship_profile_shell_hull(
+        vec![
+            ShellProfileSectionTopology::ship(0.0, -0.5, 0.2, 0.5),
+            ShellProfileSectionTopology::ship(1.0, -0.5, 0.2, 0.5),
+            ShellProfileSectionTopology::ship(2.0, -0.5, 0.2, 0.5),
+        ]
+        .into_boxed_slice(),
+        0.08,
+        OpenTopPolicy::Closed,
+    );
+
+    assert_eq!(
+        topology.fixed_topology_helper_kind(),
+        Some(ShellFixedTopologyHelperKind::ShipProfileShellHull)
+    );
+}
+
+#[test]
+fn authored_station_profile_is_not_fixed_topology_helper_candidate() {
+    let nodes = [
+        ShellProfileNodeTopology::new(
+            0.0,
+            -0.3,
+            ShellProfileNodeContinuity::Linear,
+        ),
+        ShellProfileNodeTopology::new(
+            0.4,
+            0.0,
+            ShellProfileNodeContinuity::Smooth,
+        ),
+        ShellProfileNodeTopology::new(
+            0.2,
+            0.3,
+            ShellProfileNodeContinuity::Linear,
+        ),
+    ];
+    let topology = ShellTopology::ship_profile_shell_hull(
+        vec![
+            ShellProfileSectionTopology::station_curve(0.0, &nodes),
+            ShellProfileSectionTopology::station_curve(1.0, &nodes),
+        ]
+        .into_boxed_slice(),
+        0.08,
+        OpenTopPolicy::Closed,
+    );
+
+    assert_eq!(topology.fixed_topology_helper_kind(), None);
+}
+
 #[test]
 fn station_span_interpolation_mode_is_preserved_in_profile_topology() {
     let sections = [0.0, 0.4, 0.8, 1.2]

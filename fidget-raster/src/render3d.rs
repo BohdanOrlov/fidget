@@ -230,6 +230,25 @@ pub struct VoxelRenderStats {
     pub shell_closest_iterations: u64,
     /// Native shell gradient helper calls.
     pub shell_grad_helper_calls: u64,
+    /// JIT native shell helper calls crossing the Rust helper ABI.
+    pub shell_jit_helper_calls: u64,
+    /// Logical sample lanes processed by JIT native shell helpers.
+    pub shell_jit_helper_lanes: u64,
+    /// Scalar point JIT native shell helper calls.
+    pub shell_jit_point_helper_calls: u64,
+    /// Four-lane float-slice JIT native shell helper calls.
+    pub shell_jit_float4_helper_calls: u64,
+    /// Logical sample lanes processed by float4 JIT native shell helpers.
+    pub shell_jit_float4_helper_lanes: u64,
+    /// Interval JIT native shell helper calls.
+    pub shell_jit_interval_helper_calls: u64,
+    /// Gradient JIT native shell helper calls.
+    pub shell_jit_grad_helper_calls: u64,
+    /// Helper calls matching the fixed-topology specialization stub.
+    pub shell_jit_fixed_topology_helper_candidate_calls: u64,
+    /// Helper lanes matching the fixed-topology specialization stub.
+    pub shell_jit_fixed_topology_helper_candidate_lanes: u64,
+
     /// Native shell interval hot-loop allocation count.
     pub shell_interval_hot_loop_allocations: u64,
     /// Native shell float-slice hot-loop allocation count.
@@ -372,6 +391,21 @@ impl VoxelRenderStats {
         self.shell_active_segment_samples += other.shell_active_segment_samples;
         self.shell_closest_iterations += other.shell_closest_iterations;
         self.shell_grad_helper_calls += other.shell_grad_helper_calls;
+        self.shell_jit_helper_calls += other.shell_jit_helper_calls;
+        self.shell_jit_helper_lanes += other.shell_jit_helper_lanes;
+        self.shell_jit_point_helper_calls += other.shell_jit_point_helper_calls;
+        self.shell_jit_float4_helper_calls +=
+            other.shell_jit_float4_helper_calls;
+        self.shell_jit_float4_helper_lanes +=
+            other.shell_jit_float4_helper_lanes;
+        self.shell_jit_interval_helper_calls +=
+            other.shell_jit_interval_helper_calls;
+        self.shell_jit_grad_helper_calls += other.shell_jit_grad_helper_calls;
+        self.shell_jit_fixed_topology_helper_candidate_calls +=
+            other.shell_jit_fixed_topology_helper_candidate_calls;
+        self.shell_jit_fixed_topology_helper_candidate_lanes +=
+            other.shell_jit_fixed_topology_helper_candidate_lanes;
+
         self.shell_interval_hot_loop_allocations +=
             other.shell_interval_hot_loop_allocations;
         self.shell_float_slice_hot_loop_allocations +=
@@ -1347,6 +1381,22 @@ pub fn render_with_stats<F: Function>(
     stats.shell_closest_iterations =
         shell_stats.profile2d_hermite_newton_iterations;
     stats.shell_grad_helper_calls = shell_stats.profile2d_gradient_calls;
+    stats.shell_jit_helper_calls = shell_stats.jit_shell_helper_calls;
+    stats.shell_jit_helper_lanes = shell_stats.jit_shell_helper_lanes;
+    stats.shell_jit_point_helper_calls =
+        shell_stats.jit_shell_point_helper_calls;
+    stats.shell_jit_float4_helper_calls =
+        shell_stats.jit_shell_float4_helper_calls;
+    stats.shell_jit_float4_helper_lanes =
+        shell_stats.jit_shell_float4_helper_lanes;
+    stats.shell_jit_interval_helper_calls =
+        shell_stats.jit_shell_interval_helper_calls;
+    stats.shell_jit_grad_helper_calls = shell_stats.jit_shell_grad_helper_calls;
+    stats.shell_jit_fixed_topology_helper_candidate_calls =
+        shell_stats.jit_shell_fixed_topology_helper_candidate_calls;
+    stats.shell_jit_fixed_topology_helper_candidate_lanes =
+        shell_stats.jit_shell_fixed_topology_helper_candidate_lanes;
+
     stats.shell_interval_hot_loop_allocations =
         shell_stats.interval_hot_loop_allocations;
     stats.shell_float_slice_hot_loop_allocations =
@@ -1612,6 +1662,22 @@ pub fn render_leaf_debug<F: Function>(
     stats.shell_closest_iterations =
         shell_stats.profile2d_hermite_newton_iterations;
     stats.shell_grad_helper_calls = shell_stats.profile2d_gradient_calls;
+    stats.shell_jit_helper_calls = shell_stats.jit_shell_helper_calls;
+    stats.shell_jit_helper_lanes = shell_stats.jit_shell_helper_lanes;
+    stats.shell_jit_point_helper_calls =
+        shell_stats.jit_shell_point_helper_calls;
+    stats.shell_jit_float4_helper_calls =
+        shell_stats.jit_shell_float4_helper_calls;
+    stats.shell_jit_float4_helper_lanes =
+        shell_stats.jit_shell_float4_helper_lanes;
+    stats.shell_jit_interval_helper_calls =
+        shell_stats.jit_shell_interval_helper_calls;
+    stats.shell_jit_grad_helper_calls = shell_stats.jit_shell_grad_helper_calls;
+    stats.shell_jit_fixed_topology_helper_candidate_calls =
+        shell_stats.jit_shell_fixed_topology_helper_candidate_calls;
+    stats.shell_jit_fixed_topology_helper_candidate_lanes =
+        shell_stats.jit_shell_fixed_topology_helper_candidate_lanes;
+
     stats.shell_interval_hot_loop_allocations =
         shell_stats.interval_hot_loop_allocations;
     stats.shell_float_slice_hot_loop_allocations =

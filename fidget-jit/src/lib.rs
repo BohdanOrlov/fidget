@@ -33,9 +33,10 @@ use fidget_core::{
     },
     render::{NativeRenderMetadata, RenderHints, TileSizes},
     shell::{
-        ShellEvalScratch, ShellIntervalTrace, ShellParamsView, ShellTopology,
-        eval_shell_distance, eval_shell_distance4, eval_shell_grad,
-        eval_shell_interval, eval_shell_interval_with_trace,
+        ShellEvalScratch, ShellIntervalTrace, ShellJitHelperKind,
+        ShellParamsView, ShellTopology, eval_shell_distance,
+        eval_shell_distance4, eval_shell_grad, eval_shell_interval,
+        eval_shell_interval_with_trace, record_jit_shell_helper_call,
     },
     types::{Grad, Interval},
     var::VarMap,
@@ -139,6 +140,8 @@ pub(crate) extern "C" fn jit_shell_point(
             .as_ref()
             .expect("JIT shell helper received null topology pointer")
     };
+    record_jit_shell_helper_call(ShellJitHelperKind::Point, shell);
+
     let mut scratch = ShellEvalScratch::default();
     eval_shell_distance(shell, ShellParamsView::empty(), &mut scratch, x, y, z)
         .distance
@@ -156,6 +159,8 @@ pub(crate) extern "C" fn jit_shell_float4(
             .as_ref()
             .expect("JIT shell helper received null topology pointer")
     };
+    record_jit_shell_helper_call(ShellJitHelperKind::Float4, shell);
+
     let xs = unsafe { [*xs.add(0), *xs.add(1), *xs.add(2), *xs.add(3)] };
     let ys = unsafe { [*ys.add(0), *ys.add(1), *ys.add(2), *ys.add(3)] };
     let zs = unsafe { [*zs.add(0), *zs.add(1), *zs.add(2), *zs.add(3)] };
@@ -176,6 +181,8 @@ pub(crate) extern "C" fn jit_shell_interval(
             .as_ref()
             .expect("JIT shell helper received null topology pointer")
     };
+    record_jit_shell_helper_call(ShellJitHelperKind::Interval, shell);
+
     if shell.profile.is_some() {
         return eval_shell_interval(shell, x, y, z);
     }
@@ -200,6 +207,8 @@ pub(crate) extern "C" fn jit_shell_grad_ptr(
             .as_ref()
             .expect("JIT shell helper received null topology pointer")
     };
+    record_jit_shell_helper_call(ShellJitHelperKind::Grad, shell);
+
     let x = unsafe { *x };
     let y = unsafe { *y };
     let z = unsafe { *z };
@@ -1518,12 +1527,14 @@ mod test {
         types::{Grad, Interval},
         var::Var,
     };
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     fidget_core::grad_slice_tests!(JitFunction);
     fidget_core::interval_tests!(JitFunction);
     fidget_core::float_slice_tests!(JitFunction);
     fidget_core::point_tests!(JitFunction);
+
+    static JIT_SHELL_STATS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn jit_3d_tile_hints_preserve_general_render_defaults() {
@@ -1666,6 +1677,8 @@ mod test {
 
     #[test]
     fn shell_jit_interval_trace_collects_without_second_interval_eval() {
+        let _stats_guard = JIT_SHELL_STATS_TEST_LOCK.lock().unwrap();
+
         let tree = Tree::line_loft_shell(multi_segment_shell());
         let mut ctx = Context::new();
         let root = ctx.import(&tree);
@@ -1692,6 +1705,8 @@ mod test {
 
     #[test]
     fn profile_shell_jit_interval_does_not_emit_sidecar_trace() {
+        let _stats_guard = JIT_SHELL_STATS_TEST_LOCK.lock().unwrap();
+
         let tree = Tree::shell_hull(profile_shell());
         let mut ctx = Context::new();
         let root = ctx.import(&tree);
@@ -1804,6 +1819,65 @@ mod test {
             .distance;
             assert_approx_eq(out[0][i], scalar);
         }
+    }
+
+    #[test]
+    fn jit_shell_helper_stats_record_fixed_topology_float4_candidates() {
+        let _stats_guard = JIT_SHELL_STATS_TEST_LOCK.lock().unwrap();
+
+        let shell = profile_packet_shell();
+        let tree = Tree::shell_hull(shell);
+        let mut ctx = Context::new();
+        let root = ctx.import(&tree);
+        let shape = JitFunction::new(&ctx, &[root]).unwrap();
+        let tape = shape.float_slice_tape(Default::default());
+        let samples = [
+            (1.10, 0.18, -0.18),
+            (1.25, -0.32, 0.02),
+            (1.50, 0.44, 0.26),
+            (1.85, -0.58, 0.62),
+        ];
+        let mut args = vec![vec![0.0; samples.len()]; tape.vars().len()];
+        for (i, &(x, y, z)) in samples.iter().enumerate() {
+            args[tape.vars()[&Var::X]][i] = x;
+            args[tape.vars()[&Var::Y]][i] = y;
+            args[tape.vars()[&Var::Z]][i] = z;
+        }
+
+        set_shell_eval_stats_enabled(true);
+        reset_shell_eval_stats();
+        let mut eval = JitFunction::new_float_slice_eval();
+        let _out = eval.eval(&tape, &args).unwrap();
+        let stats = shell_eval_stats();
+        set_shell_eval_stats_enabled(false);
+
+        assert_eq!(stats.jit_shell_helper_calls, 1);
+        assert_eq!(stats.jit_shell_helper_lanes, 4);
+        assert_eq!(stats.jit_shell_float4_helper_calls, 1);
+        assert_eq!(stats.jit_shell_float4_helper_lanes, 4);
+        assert_eq!(stats.jit_shell_fixed_topology_helper_candidate_calls, 1);
+        assert_eq!(stats.jit_shell_fixed_topology_helper_candidate_lanes, 4);
+    }
+
+    #[test]
+    fn jit_shell_helper_stats_do_not_mark_generic_line_loft_as_fixed_topology()
+    {
+        let _stats_guard = JIT_SHELL_STATS_TEST_LOCK.lock().unwrap();
+        let shape = shell_shape();
+        let tape = shape.point_tape(Default::default());
+        let args = point_args(tape.vars(), 1.0, 1.25, 0.0);
+
+        set_shell_eval_stats_enabled(true);
+        reset_shell_eval_stats();
+        let mut eval = JitFunction::new_point_eval();
+        let (_out, _trace) = eval.eval(&tape, &args).unwrap();
+        let stats = shell_eval_stats();
+        set_shell_eval_stats_enabled(false);
+
+        assert_eq!(stats.jit_shell_point_helper_calls, 1);
+        assert_eq!(stats.jit_shell_helper_calls, 1);
+        assert_eq!(stats.jit_shell_fixed_topology_helper_candidate_calls, 0);
+        assert_eq!(stats.jit_shell_fixed_topology_helper_candidate_lanes, 0);
     }
 
     #[test]
