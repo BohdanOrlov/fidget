@@ -429,7 +429,7 @@ pub struct ShellEvalStats {
     pub profile2d_hermite_duplicate_t_attempts: u64,
     /// Hermite distance evaluations after duplicate refined roots are removed.
     pub profile2d_hermite_distance_evaluations: u64,
-    /// Hermite edge distance evaluations actually performed for refined seeds.
+    /// Hermite edge distance evaluations actually performed after duplicate roots are skipped.
     pub profile2d_hermite_final_distance_evaluations: u64,
     /// Hermite closest-point evaluations with an observed winning seed.
     pub profile2d_hermite_wins_total: u64,
@@ -2863,14 +2863,16 @@ fn distance_to_profile_hermite_edge(
     };
     let mut winning_seed = HermiteSeedKind::Endpoint;
     let mut refined_ts = [0.0_f32; 5];
-    let mut refined_t_count = 0usize;
-    for (candidate, seed) in [
+    for (refined_t_count, (candidate, seed)) in [
         (0.0, HermiteSeedKind::Endpoint),
         (0.25, HermiteSeedKind::Quarter25),
         (0.5, HermiteSeedKind::Quarter50),
         (0.75, HermiteSeedKind::Quarter75),
         (1.0, HermiteSeedKind::Endpoint),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let (t, iterations) =
             refine_profile_hermite_closest_t(p, edge, candidate);
         if stats_enabled {
@@ -2883,10 +2885,11 @@ fn distance_to_profile_hermite_edge(
                     .fetch_add(1, Ordering::Relaxed);
             }
         }
+        let duplicate_t = refined_ts[..refined_t_count]
+            .iter()
+            .any(|previous| t.to_bits() == previous.to_bits());
+        refined_ts[refined_t_count] = t;
         if stats_enabled {
-            let duplicate_t = refined_ts[..refined_t_count]
-                .iter()
-                .any(|previous| t.to_bits() == previous.to_bits());
             if duplicate_t {
                 PROFILE2D_HERMITE_DUPLICATE_T_ATTEMPTS
                     .fetch_add(1, Ordering::Relaxed);
@@ -2894,8 +2897,9 @@ fn distance_to_profile_hermite_edge(
                 PROFILE2D_HERMITE_DISTANCE_EVALUATIONS
                     .fetch_add(1, Ordering::Relaxed);
             }
-            refined_ts[refined_t_count] = t;
-            refined_t_count += 1;
+        }
+        if duplicate_t {
+            continue;
         }
         if stats_enabled {
             PROFILE2D_EDGE_DISTANCE_EVALUATIONS.fetch_add(1, Ordering::Relaxed);
@@ -3490,6 +3494,38 @@ mod tests {
     }
 
     #[test]
+    fn profile2d_skips_duplicate_hermite_final_distance_evaluations() {
+        let _lock = SHELL_EVAL_STATS_TEST_LOCK
+            .lock()
+            .expect("stats lock should not be poisoned");
+        let a = ProfileNodeSample {
+            half_width: 0.0,
+            z: 0.0,
+            continuity: ShellProfileNodeContinuity::Smooth,
+        };
+        let c = ProfileNodeSample {
+            half_width: 1.0,
+            z: 1.0,
+            continuity: ShellProfileNodeContinuity::Smooth,
+        };
+        let edge = ProfileHermiteEdge::new(a, c, 1.0, 1.0);
+
+        set_shell_eval_stats_enabled(true);
+        reset_shell_eval_stats();
+        let distance =
+            distance_to_profile_hermite_edge([-0.5, -0.5], a, c, edge, true);
+        let stats = shell_eval_stats();
+        set_shell_eval_stats_enabled(false);
+
+        assert!(distance.distance_sq.is_finite());
+        assert_eq!(stats.profile2d_hermite_seed_attempts, 5);
+        assert_eq!(stats.profile2d_hermite_duplicate_t_attempts, 4);
+        assert_eq!(stats.profile2d_hermite_distance_evaluations, 1);
+        assert_eq!(stats.profile2d_hermite_final_distance_evaluations, 1);
+        assert_eq!(stats.profile2d_edge_distance_evaluations, 1);
+    }
+
+    #[test]
     fn smooth_profile_edge_bounds_use_actual_hermite_extrema() {
         let a = ProfileNodeSample {
             half_width: 0.0,
@@ -3581,9 +3617,9 @@ mod tests {
             "Hermite distance evaluations plus duplicate refined roots should account for every seed attempt; stats={stats:?}",
         );
         assert_eq!(
-            stats.profile2d_hermite_seed_attempts,
+            stats.profile2d_hermite_distance_evaluations,
             stats.profile2d_hermite_final_distance_evaluations,
-            "Hermite final distance evaluations should record every refined seed, including duplicate roots; stats={stats:?}",
+            "Hermite final distance evaluations should skip duplicate refined roots; stats={stats:?}",
         );
         assert!(
             stats.profile2d_edge_distance_evaluations
