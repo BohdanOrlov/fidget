@@ -1950,6 +1950,7 @@ fn sample_profile_nodes(
 }
 
 #[inline(always)]
+#[allow(clippy::needless_range_loop)]
 fn sample_profile_nodes_outer_packet4(
     profile: &ShellProfileTopology,
     segment: ShellProfileSegmentTopology,
@@ -2025,6 +2026,7 @@ fn sample_profile_nodes_outer_packet4(
 }
 
 #[inline(always)]
+#[allow(clippy::needless_range_loop)]
 fn sample_profile_nodes_packet4(
     profile: &ShellProfileTopology,
     segment: ShellProfileSegmentTopology,

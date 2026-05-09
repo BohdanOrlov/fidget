@@ -313,6 +313,11 @@ impl<const N: usize> Function for GenericVmFunction<N> {
         self.0.native_render_metadata()
     }
 
+    #[inline]
+    fn has_native_render_metadata(&self) -> bool {
+        !self.0.shell_topologies().is_empty()
+    }
+
     fn size(&self) -> usize {
         GenericVmFunction::size(self)
     }

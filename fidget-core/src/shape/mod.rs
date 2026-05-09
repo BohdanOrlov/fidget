@@ -225,6 +225,12 @@ impl<F: Function + Clone, T> Shape<F, T> {
     pub fn native_render_metadata(&self) -> Option<NativeRenderMetadata> {
         self.f.native_render_metadata()
     }
+
+    /// Returns true if native metadata is available for render pruning.
+    #[inline]
+    pub fn has_native_render_metadata(&self) -> bool {
+        self.f.has_native_render_metadata()
+    }
 }
 
 impl<F, T> Shape<F, T> {

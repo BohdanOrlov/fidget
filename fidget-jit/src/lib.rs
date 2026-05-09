@@ -1081,6 +1081,11 @@ impl Function for JitFunction {
         self.0.native_render_metadata()
     }
 
+    #[inline]
+    fn has_native_render_metadata(&self) -> bool {
+        self.0.has_native_render_metadata()
+    }
+
     fn size(&self) -> usize {
         self.0.size()
     }

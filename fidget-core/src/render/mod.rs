@@ -111,6 +111,11 @@ impl<F: Function, T> RenderHandle<F, T> {
         self.shape.native_render_metadata()
     }
 
+    /// Returns true if native metadata is available for render pruning.
+    pub fn has_native_render_metadata(&self) -> bool {
+        self.shape.has_native_render_metadata()
+    }
+
     /// Returns a tape for tracing interval evaluation
     #[inline]
     pub fn i_tape(

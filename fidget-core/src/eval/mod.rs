@@ -195,6 +195,11 @@ pub trait Function: Send + Sync + Clone {
         None
     }
 
+    /// Returns true if native render metadata is available.
+    fn has_native_render_metadata(&self) -> bool {
+        false
+    }
+
     /// Returns a size associated with this function
     ///
     /// This is underspecified and only used for unit testing; for tape-based

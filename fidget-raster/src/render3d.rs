@@ -778,6 +778,8 @@ impl<F: Function> Worker<'_, F> {
         }
 
         const LEAF_DEPTH_BATCH: usize = 1;
+        let leaf_interval_pruning = shape.has_native_render_metadata();
+        let full_column_count = tile_size.pow(2);
 
         let mut grad = 0;
         let mut upper_k = tile_size;
@@ -788,6 +790,29 @@ impl<F: Function> Worker<'_, F> {
             }
             let lower_k = upper_k.saturating_sub(LEAF_DEPTH_BATCH);
             let depth_count = upper_k - lower_k;
+
+            // Coarse native-shell pruning: never compact individual samples.
+            if leaf_interval_pruning && size == full_column_count {
+                let base = Point3::from(tile.corner).cast::<f32>();
+                let x = Interval::new(base.x, base.x + tile_size as f32);
+                let y = Interval::new(base.y, base.y + tile_size as f32);
+                let z = Interval::new(
+                    base.z + lower_k as f32,
+                    base.z + upper_k as f32,
+                );
+                let start = Instant::now();
+                let (i, _trace) = self
+                    .eval_interval
+                    .eval_v(shape.i_tape(&mut self.tape_storage), x, y, z, vars)
+                    .unwrap();
+                self.stats.interval_eval_time += start.elapsed();
+                self.stats.interval_eval_calls += 1;
+                if i.lower() > 0.0 {
+                    self.stats.shell_interval_rejects += 1;
+                    upper_k = lower_k;
+                    continue;
+                }
+            }
 
             let mut sample_count = 0;
             for column_index in 0..size {
@@ -1774,9 +1799,12 @@ mod test {
     use super::*;
     use fidget_core::{
         Context,
+        context::Tree,
         render::{TileSizes, VoxelSize},
+        shell::{ShellSectionTopology, ShellTopology},
         vm::VmShape,
     };
+    use std::sync::Arc;
 
     /// Make sure we don't crash if there's only a single tile
     #[test]
@@ -1837,6 +1865,33 @@ mod test {
         let (_image, stats) = cfg.run_with_stats(shape).unwrap();
 
         assert_eq!(stats.float_eval_samples, 288);
+    }
+
+    #[test]
+    fn native_shell_leaf_interval_pruning_skips_empty_slabs() {
+        let shell = Arc::new(ShellTopology::line_loft_circles(
+            vec![
+                ShellSectionTopology::circle(-1.0, 0.0, 0.0, 0.25),
+                ShellSectionTopology::circle(1.0, 0.0, 0.0, 0.25),
+            ]
+            .into_boxed_slice(),
+        ));
+        let tree = Tree::line_loft_shell(shell);
+        let mut ctx = Context::new();
+        let root = ctx.import(&tree);
+        let shape = VmShape::new(&ctx, root).unwrap();
+
+        let cfg = VoxelRenderConfig {
+            image_size: VoxelSize::new(8, 8, 8),
+            tile_sizes: TileSizes::new(&[8]).unwrap(),
+            threads: None,
+            ..Default::default()
+        };
+        let (_image, stats) = cfg.run_with_stats(shape).unwrap();
+
+        assert!(stats.interval_eval_calls > 1);
+        assert!(stats.shell_interval_rejects > 0);
+        assert!(stats.float_eval_samples < 8 * 8 * 8);
     }
 
     #[test]
