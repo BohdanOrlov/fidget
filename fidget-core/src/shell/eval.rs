@@ -206,6 +206,12 @@ static PROFILE2D_STATION_LOOKUP_CALLS: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_STATION_LOOKUP_PACKET4_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_STATION_LOOKUP_PACKET4_HITS: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_STATION_LOOKUP_PACKET4_MISSES: AtomicU64 = AtomicU64::new(0);
+static JIT_SHELL_FLOAT4_HELPER_CALLS: AtomicU64 = AtomicU64::new(0);
+static JIT_SHELL_FLOAT4_HELPER_LANES: AtomicU64 = AtomicU64::new(0);
+static JIT_SHELL_FLOAT4_PACKET_FAST_PATH_HITS: AtomicU64 = AtomicU64::new(0);
+static JIT_SHELL_FLOAT4_SCALAR_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+static JIT_SHELL_FLOAT4_SCALAR_FALLBACK_LANES: AtomicU64 = AtomicU64::new(0);
+static JIT_SHELL_FLOAT4_SPILL_RESTORE_BYTES: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_SEGMENT_TESTS: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_BEZIER_TESTS: AtomicU64 = AtomicU64::new(0);
 static PROFILE2D_FALLBACKS: AtomicU64 = AtomicU64::new(0);
@@ -250,6 +256,20 @@ static FLOAT_SLICE_HOT_LOOP_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 static GRAD_SLICE_HOT_LOOP_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 static SHELL_EVAL_STATS_ENABLED: AtomicBool = AtomicBool::new(false);
 
+const JIT_SHELL_FLOAT4_LANES: u64 = 4;
+const JIT_SHELL_FLOAT4_SPILL_RESTORE_BYTES_PER_CALL: u64 = {
+    #[cfg(target_arch = "aarch64")]
+    {
+        // AArch64 float_slice shell calls save and restore 24 q registers, store
+        // x/y/z input vectors, and reload the output vector around the C ABI.
+        (24 + 3 + 24 + 1) * 16
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        0
+    }
+};
+
 thread_local! {
     static PROFILE2D_OUTER_DISTANCE_BATCH_CALLS: Cell<u64> =
         const { Cell::new(0) };
@@ -287,6 +307,18 @@ pub struct ShellEvalStats {
     pub profile2d_station_lookup_packet4_hits: u64,
     /// Four-lane profile packet station lookups that fell back to scalar.
     pub profile2d_station_lookup_packet4_misses: u64,
+    /// Calls into the JIT float4 native shell distance helper.
+    pub jit_shell_float4_helper_calls: u64,
+    /// Lanes passed through the JIT float4 native shell distance helper.
+    pub jit_shell_float4_helper_lanes: u64,
+    /// JIT float4 helper calls that used the same-segment packet fast path.
+    pub jit_shell_float4_packet_fast_path_hits: u64,
+    /// JIT float4 helper calls that fell back to scalar lane evaluation.
+    pub jit_shell_float4_scalar_fallbacks: u64,
+    /// JIT float4 helper lanes evaluated by the scalar fallback.
+    pub jit_shell_float4_scalar_fallback_lanes: u64,
+    /// Proxy bytes moved by visible JIT helper spill/restore code.
+    pub jit_shell_float4_spill_restore_bytes: u64,
     /// Profile boundary segment tests performed by the 2D evaluator.
     pub profile2d_segment_tests: u64,
     /// Quadratic profile edge closest-point tests.
@@ -392,6 +424,12 @@ pub fn reset_shell_eval_stats() {
     PROFILE2D_STATION_LOOKUP_PACKET4_ATTEMPTS.store(0, Ordering::Relaxed);
     PROFILE2D_STATION_LOOKUP_PACKET4_HITS.store(0, Ordering::Relaxed);
     PROFILE2D_STATION_LOOKUP_PACKET4_MISSES.store(0, Ordering::Relaxed);
+    JIT_SHELL_FLOAT4_HELPER_CALLS.store(0, Ordering::Relaxed);
+    JIT_SHELL_FLOAT4_HELPER_LANES.store(0, Ordering::Relaxed);
+    JIT_SHELL_FLOAT4_PACKET_FAST_PATH_HITS.store(0, Ordering::Relaxed);
+    JIT_SHELL_FLOAT4_SCALAR_FALLBACKS.store(0, Ordering::Relaxed);
+    JIT_SHELL_FLOAT4_SCALAR_FALLBACK_LANES.store(0, Ordering::Relaxed);
+    JIT_SHELL_FLOAT4_SPILL_RESTORE_BYTES.store(0, Ordering::Relaxed);
     PROFILE2D_SEGMENT_TESTS.store(0, Ordering::Relaxed);
     PROFILE2D_BEZIER_TESTS.store(0, Ordering::Relaxed);
     PROFILE2D_FALLBACKS.store(0, Ordering::Relaxed);
@@ -462,6 +500,18 @@ pub fn shell_eval_stats() -> ShellEvalStats {
             PROFILE2D_STATION_LOOKUP_PACKET4_HITS.load(Ordering::Relaxed),
         profile2d_station_lookup_packet4_misses:
             PROFILE2D_STATION_LOOKUP_PACKET4_MISSES.load(Ordering::Relaxed),
+        jit_shell_float4_helper_calls: JIT_SHELL_FLOAT4_HELPER_CALLS
+            .load(Ordering::Relaxed),
+        jit_shell_float4_helper_lanes: JIT_SHELL_FLOAT4_HELPER_LANES
+            .load(Ordering::Relaxed),
+        jit_shell_float4_packet_fast_path_hits:
+            JIT_SHELL_FLOAT4_PACKET_FAST_PATH_HITS.load(Ordering::Relaxed),
+        jit_shell_float4_scalar_fallbacks: JIT_SHELL_FLOAT4_SCALAR_FALLBACKS
+            .load(Ordering::Relaxed),
+        jit_shell_float4_scalar_fallback_lanes:
+            JIT_SHELL_FLOAT4_SCALAR_FALLBACK_LANES.load(Ordering::Relaxed),
+        jit_shell_float4_spill_restore_bytes:
+            JIT_SHELL_FLOAT4_SPILL_RESTORE_BYTES.load(Ordering::Relaxed),
         profile2d_segment_tests: PROFILE2D_SEGMENT_TESTS
             .load(Ordering::Relaxed),
         profile2d_bezier_tests: PROFILE2D_BEZIER_TESTS.load(Ordering::Relaxed),
@@ -799,11 +849,26 @@ pub fn eval_shell_distance4(
     ys: [f32; 4],
     zs: [f32; 4],
 ) -> [f32; 4] {
+    let stats_enabled = shell_eval_stats_enabled();
+    if stats_enabled {
+        JIT_SHELL_FLOAT4_HELPER_CALLS.fetch_add(1, Ordering::Relaxed);
+        JIT_SHELL_FLOAT4_HELPER_LANES
+            .fetch_add(JIT_SHELL_FLOAT4_LANES, Ordering::Relaxed);
+        JIT_SHELL_FLOAT4_SPILL_RESTORE_BYTES.fetch_add(
+            JIT_SHELL_FLOAT4_SPILL_RESTORE_BYTES_PER_CALL,
+            Ordering::Relaxed,
+        );
+    }
+
     if topology.kind == ShellOpKind::ShellHull
         && let Some(profile) = topology.profile.as_ref()
         && let Some(segment_index) =
-            shared_profile_packet_segment_index(topology, xs)
+            shared_profile_packet_segment_index(topology, xs, stats_enabled)
     {
+        if stats_enabled {
+            JIT_SHELL_FLOAT4_PACKET_FAST_PATH_HITS
+                .fetch_add(1, Ordering::Relaxed);
+        }
         return eval_profile_shell_hull_packet4(
             topology,
             profile,
@@ -812,6 +877,12 @@ pub fn eval_shell_distance4(
             ys,
             zs,
         );
+    }
+
+    if stats_enabled {
+        JIT_SHELL_FLOAT4_SCALAR_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+        JIT_SHELL_FLOAT4_SCALAR_FALLBACK_LANES
+            .fetch_add(JIT_SHELL_FLOAT4_LANES, Ordering::Relaxed);
     }
 
     let mut scratch = ShellEvalScratch::default();
@@ -859,8 +930,8 @@ pub fn eval_shell_distance4(
 fn shared_profile_packet_segment_index(
     topology: &ShellTopology,
     xs: [f32; 4],
+    stats_enabled: bool,
 ) -> Option<usize> {
-    let stats_enabled = shell_eval_stats_enabled();
     if stats_enabled {
         PROFILE2D_STATION_LOOKUP_PACKET4_ATTEMPTS
             .fetch_add(1, Ordering::Relaxed);
@@ -3893,7 +3964,10 @@ mod tests {
         let xs = [1.10, 1.25, 1.50, 1.85];
         let ys = [0.18, -0.32, 0.44, -0.58];
         let zs = [-0.18, 0.02, 0.26, 0.62];
-        assert_eq!(shared_profile_packet_segment_index(&topology, xs), Some(1));
+        assert_eq!(
+            shared_profile_packet_segment_index(&topology, xs, false),
+            Some(1)
+        );
 
         let packet = eval_shell_distance4(&topology, xs, ys, zs);
         let mut scratch = ShellEvalScratch::default();
@@ -3949,10 +4023,67 @@ mod tests {
         assert_eq!(stats.profile2d_station_lookup_packet4_hits, 1);
         assert_eq!(stats.profile2d_station_lookup_packet4_misses, 0);
         assert_eq!(stats.profile2d_station_lookup_calls, 4);
+        assert_eq!(stats.jit_shell_float4_helper_calls, 1);
+        assert_eq!(stats.jit_shell_float4_helper_lanes, 4);
+        assert_eq!(stats.jit_shell_float4_packet_fast_path_hits, 1);
+        assert_eq!(stats.jit_shell_float4_scalar_fallbacks, 0);
+        assert_eq!(stats.jit_shell_float4_scalar_fallback_lanes, 0);
+        assert_eq!(
+            stats.jit_shell_float4_spill_restore_bytes,
+            JIT_SHELL_FLOAT4_SPILL_RESTORE_BYTES_PER_CALL
+        );
         assert_eq!(reset_stats.profile2d_station_lookup_calls, 0);
         assert_eq!(reset_stats.profile2d_station_lookup_packet4_attempts, 0);
         assert_eq!(reset_stats.profile2d_station_lookup_packet4_hits, 0);
         assert_eq!(reset_stats.profile2d_station_lookup_packet4_misses, 0);
+        assert_eq!(reset_stats.jit_shell_float4_helper_calls, 0);
+        assert_eq!(reset_stats.jit_shell_float4_packet_fast_path_hits, 0);
+        assert_eq!(reset_stats.jit_shell_float4_scalar_fallbacks, 0);
+    }
+
+    #[test]
+    fn profile2d_records_float4_scalar_fallback_breakdown() {
+        let _lock = SHELL_EVAL_STATS_TEST_LOCK
+            .lock()
+            .expect("stats lock should not be poisoned");
+        let topology = ShellTopology::ship_profile_shell_hull(
+            [
+                test_profile_section(0.0),
+                test_profile_section(1.0),
+                test_profile_section(2.0),
+                test_profile_section(3.0),
+                test_profile_section(4.0),
+            ],
+            0.08,
+            OpenTopPolicy::Closed,
+        );
+        let xs = [0.10, 1.25, 1.50, 1.85];
+        let ys = [0.18, -0.32, 0.44, -0.58];
+        let zs = [-0.18, 0.02, 0.26, 0.62];
+
+        set_shell_eval_stats_enabled(true);
+        reset_shell_eval_stats();
+        let distances = eval_shell_distance4(&topology, xs, ys, zs);
+        let stats = shell_eval_stats();
+        set_shell_eval_stats_enabled(false);
+
+        assert!(distances.iter().all(|distance| distance.is_finite()));
+        assert_eq!(stats.profile2d_station_lookup_packet4_attempts, 1);
+        assert_eq!(stats.profile2d_station_lookup_packet4_hits, 0);
+        assert_eq!(stats.profile2d_station_lookup_packet4_misses, 1);
+        assert_eq!(stats.jit_shell_float4_helper_calls, 1);
+        assert_eq!(stats.jit_shell_float4_helper_lanes, 4);
+        assert_eq!(stats.jit_shell_float4_packet_fast_path_hits, 0);
+        assert_eq!(stats.jit_shell_float4_scalar_fallbacks, 1);
+        assert_eq!(stats.jit_shell_float4_scalar_fallback_lanes, 4);
+
+        reset_shell_eval_stats();
+        let gated_distances = eval_shell_distance4(&topology, xs, ys, zs);
+        let gated_stats = shell_eval_stats();
+
+        assert!(gated_distances.iter().all(|distance| distance.is_finite()));
+        assert_eq!(gated_stats.jit_shell_float4_helper_calls, 0);
+        assert_eq!(gated_stats.profile2d_station_lookup_packet4_attempts, 0);
     }
 
     fn test_profile_section(station: f32) -> ShellProfileSectionTopology {

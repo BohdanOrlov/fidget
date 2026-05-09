@@ -1742,6 +1742,33 @@ mod test {
     }
 
     #[test]
+    fn jit_shell_float4_records_helper_breakdown() {
+        let shell = profile_packet_shell();
+        let xs = [1.10, 1.25, 1.50, 1.85];
+        let ys = [0.18, -0.32, 0.44, -0.58];
+        let zs = [-0.18, 0.02, 0.26, 0.62];
+        let mut out = [0.0; 4];
+
+        set_shell_eval_stats_enabled(true);
+        reset_shell_eval_stats();
+        jit_shell_float4(
+            Arc::as_ptr(&shell),
+            xs.as_ptr(),
+            ys.as_ptr(),
+            zs.as_ptr(),
+            out.as_mut_ptr(),
+        );
+        let stats = shell_eval_stats();
+        set_shell_eval_stats_enabled(false);
+
+        assert!(out.iter().all(|distance| distance.is_finite()));
+        assert_eq!(stats.jit_shell_float4_helper_calls, 1);
+        assert_eq!(stats.jit_shell_float4_helper_lanes, 4);
+        assert_eq!(stats.jit_shell_float4_packet_fast_path_hits, 1);
+        assert_eq!(stats.jit_shell_float4_scalar_fallbacks, 0);
+    }
+
+    #[test]
     fn profile_shell_jit_float_slice_matches_scalar_profile_packet() {
         let shell = profile_packet_shell();
         let tree = Tree::shell_hull(shell.clone());

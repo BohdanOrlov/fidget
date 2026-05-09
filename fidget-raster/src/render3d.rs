@@ -128,6 +128,18 @@ pub struct VoxelRenderStats {
     pub shell_hull_profile2d_station_lookup_packet4_hits: u64,
     /// Four-lane profile packet station lookup misses.
     pub shell_hull_profile2d_station_lookup_packet4_misses: u64,
+    /// Calls into the JIT float4 native shell distance helper.
+    pub jit_shell_float4_helper_calls: u64,
+    /// Lanes passed through the JIT float4 native shell distance helper.
+    pub jit_shell_float4_helper_lanes: u64,
+    /// JIT float4 helper calls that used the same-segment packet fast path.
+    pub jit_shell_float4_packet_fast_path_hits: u64,
+    /// JIT float4 helper calls that fell back to scalar lane evaluation.
+    pub jit_shell_float4_scalar_fallbacks: u64,
+    /// JIT float4 helper lanes evaluated by the scalar fallback.
+    pub jit_shell_float4_scalar_fallback_lanes: u64,
+    /// Proxy bytes moved by visible JIT helper spill/restore code.
+    pub jit_shell_float4_spill_restore_bytes: u64,
     /// Float-eval batches that performed outer profile distance work.
     pub shell_hull_profile2d_outer_distance_batches: u64,
     /// Samples in batches that performed outer profile distance work.
@@ -264,6 +276,18 @@ impl VoxelRenderStats {
             other.shell_hull_profile2d_station_lookup_packet4_hits;
         self.shell_hull_profile2d_station_lookup_packet4_misses +=
             other.shell_hull_profile2d_station_lookup_packet4_misses;
+        self.jit_shell_float4_helper_calls +=
+            other.jit_shell_float4_helper_calls;
+        self.jit_shell_float4_helper_lanes +=
+            other.jit_shell_float4_helper_lanes;
+        self.jit_shell_float4_packet_fast_path_hits +=
+            other.jit_shell_float4_packet_fast_path_hits;
+        self.jit_shell_float4_scalar_fallbacks +=
+            other.jit_shell_float4_scalar_fallbacks;
+        self.jit_shell_float4_scalar_fallback_lanes +=
+            other.jit_shell_float4_scalar_fallback_lanes;
+        self.jit_shell_float4_spill_restore_bytes +=
+            other.jit_shell_float4_spill_restore_bytes;
         self.shell_hull_profile2d_outer_distance_batches +=
             other.shell_hull_profile2d_outer_distance_batches;
         self.shell_hull_profile2d_outer_distance_batch_samples +=
@@ -365,6 +389,26 @@ impl VoxelRenderStats {
         } else {
             self.shell_active_segment_sum as f64
                 / self.shell_active_segment_samples as f64
+        }
+    }
+
+    /// Share of JIT float4 helper calls that stayed in one profile segment.
+    pub fn jit_shell_float4_same_segment_rate(&self) -> f64 {
+        if self.jit_shell_float4_helper_calls == 0 {
+            0.0
+        } else {
+            self.jit_shell_float4_packet_fast_path_hits as f64
+                / self.jit_shell_float4_helper_calls as f64
+        }
+    }
+
+    /// Average lane batch size for JIT float4 helper calls.
+    pub fn jit_shell_float4_avg_helper_batch(&self) -> f64 {
+        if self.jit_shell_float4_helper_calls == 0 {
+            0.0
+        } else {
+            self.jit_shell_float4_helper_lanes as f64
+                / self.jit_shell_float4_helper_calls as f64
         }
     }
 
@@ -1218,6 +1262,18 @@ pub fn render_with_stats<F: Function>(
         shell_stats.profile2d_station_lookup_packet4_hits;
     stats.shell_hull_profile2d_station_lookup_packet4_misses =
         shell_stats.profile2d_station_lookup_packet4_misses;
+    stats.jit_shell_float4_helper_calls =
+        shell_stats.jit_shell_float4_helper_calls;
+    stats.jit_shell_float4_helper_lanes =
+        shell_stats.jit_shell_float4_helper_lanes;
+    stats.jit_shell_float4_packet_fast_path_hits =
+        shell_stats.jit_shell_float4_packet_fast_path_hits;
+    stats.jit_shell_float4_scalar_fallbacks =
+        shell_stats.jit_shell_float4_scalar_fallbacks;
+    stats.jit_shell_float4_scalar_fallback_lanes =
+        shell_stats.jit_shell_float4_scalar_fallback_lanes;
+    stats.jit_shell_float4_spill_restore_bytes =
+        shell_stats.jit_shell_float4_spill_restore_bytes;
     stats.shell_hull_profile2d_segment_tests =
         shell_stats.profile2d_segment_tests;
     stats.shell_hull_profile2d_bezier_tests =
@@ -1384,11 +1440,19 @@ pub fn render_with_stats<F: Function>(
             stats.shell_allocations,
         );
         eprintln!(
-            "render3d shell profile breakdown: shell_hull_profile2d_station_lookup_calls={} shell_hull_profile2d_station_lookup_packet4_attempts={} shell_hull_profile2d_station_lookup_packet4_hits={} shell_hull_profile2d_station_lookup_packet4_misses={} shell_hull_profile2d_edges_bezier_hull_pruned={} shell_hull_profile2d_edge_distance_evaluations={} shell_hull_profile2d_hermite_final_distance_evaluations={}",
+            "render3d shell profile breakdown: shell_hull_profile2d_station_lookup_calls={} shell_hull_profile2d_station_lookup_packet4_attempts={} shell_hull_profile2d_station_lookup_packet4_hits={} shell_hull_profile2d_station_lookup_packet4_misses={} jit_shell_float4_helper_calls={} jit_shell_float4_helper_lanes={} jit_shell_float4_packet_fast_path_hits={} jit_shell_float4_scalar_fallbacks={} jit_shell_float4_scalar_fallback_lanes={} jit_shell_float4_same_segment_rate={:.3} jit_shell_float4_avg_helper_batch={:.3} jit_shell_float4_spill_restore_bytes={} shell_hull_profile2d_edges_bezier_hull_pruned={} shell_hull_profile2d_edge_distance_evaluations={} shell_hull_profile2d_hermite_final_distance_evaluations={}",
             stats.shell_hull_profile2d_station_lookup_calls,
             stats.shell_hull_profile2d_station_lookup_packet4_attempts,
             stats.shell_hull_profile2d_station_lookup_packet4_hits,
             stats.shell_hull_profile2d_station_lookup_packet4_misses,
+            stats.jit_shell_float4_helper_calls,
+            stats.jit_shell_float4_helper_lanes,
+            stats.jit_shell_float4_packet_fast_path_hits,
+            stats.jit_shell_float4_scalar_fallbacks,
+            stats.jit_shell_float4_scalar_fallback_lanes,
+            stats.jit_shell_float4_same_segment_rate(),
+            stats.jit_shell_float4_avg_helper_batch(),
+            stats.jit_shell_float4_spill_restore_bytes,
             stats.shell_hull_profile2d_edges_bezier_hull_pruned,
             stats.shell_hull_profile2d_edge_distance_evaluations,
             stats.shell_hull_profile2d_hermite_final_distance_evaluations,
@@ -1465,6 +1529,18 @@ pub fn render_leaf_debug<F: Function>(
         shell_stats.profile2d_station_lookup_packet4_hits;
     stats.shell_hull_profile2d_station_lookup_packet4_misses =
         shell_stats.profile2d_station_lookup_packet4_misses;
+    stats.jit_shell_float4_helper_calls =
+        shell_stats.jit_shell_float4_helper_calls;
+    stats.jit_shell_float4_helper_lanes =
+        shell_stats.jit_shell_float4_helper_lanes;
+    stats.jit_shell_float4_packet_fast_path_hits =
+        shell_stats.jit_shell_float4_packet_fast_path_hits;
+    stats.jit_shell_float4_scalar_fallbacks =
+        shell_stats.jit_shell_float4_scalar_fallbacks;
+    stats.jit_shell_float4_scalar_fallback_lanes =
+        shell_stats.jit_shell_float4_scalar_fallback_lanes;
+    stats.jit_shell_float4_spill_restore_bytes =
+        shell_stats.jit_shell_float4_spill_restore_bytes;
     stats.shell_hull_profile2d_bezier_tests =
         shell_stats.profile2d_bezier_tests;
     stats.shell_hull_profile2d_fallbacks = shell_stats.profile2d_fallbacks;
@@ -1757,6 +1833,12 @@ mod test {
             shell_hull_profile2d_station_lookup_packet4_attempts: 3,
             shell_hull_profile2d_station_lookup_packet4_hits: 2,
             shell_hull_profile2d_station_lookup_packet4_misses: 1,
+            jit_shell_float4_helper_calls: 7,
+            jit_shell_float4_helper_lanes: 28,
+            jit_shell_float4_packet_fast_path_hits: 5,
+            jit_shell_float4_scalar_fallbacks: 2,
+            jit_shell_float4_scalar_fallback_lanes: 8,
+            jit_shell_float4_spill_restore_bytes: 100,
             shell_hull_profile2d_edges_bezier_hull_pruned: 31,
             shell_hull_profile2d_edge_distance_evaluations: 37,
             shell_hull_profile2d_hermite_final_distance_evaluations: 41,
@@ -1773,6 +1855,12 @@ mod test {
             shell_hull_profile2d_station_lookup_packet4_attempts: 5,
             shell_hull_profile2d_station_lookup_packet4_hits: 4,
             shell_hull_profile2d_station_lookup_packet4_misses: 1,
+            jit_shell_float4_helper_calls: 11,
+            jit_shell_float4_helper_lanes: 44,
+            jit_shell_float4_packet_fast_path_hits: 7,
+            jit_shell_float4_scalar_fallbacks: 4,
+            jit_shell_float4_scalar_fallback_lanes: 16,
+            jit_shell_float4_spill_restore_bytes: 200,
             shell_hull_profile2d_edges_bezier_hull_pruned: 47,
             shell_hull_profile2d_edge_distance_evaluations: 53,
             shell_hull_profile2d_hermite_final_distance_evaluations: 59,
@@ -1792,6 +1880,14 @@ mod test {
         );
         assert_eq!(stats.shell_hull_profile2d_station_lookup_packet4_hits, 6);
         assert_eq!(stats.shell_hull_profile2d_station_lookup_packet4_misses, 2);
+        assert_eq!(stats.jit_shell_float4_helper_calls, 18);
+        assert_eq!(stats.jit_shell_float4_helper_lanes, 72);
+        assert_eq!(stats.jit_shell_float4_packet_fast_path_hits, 12);
+        assert_eq!(stats.jit_shell_float4_scalar_fallbacks, 6);
+        assert_eq!(stats.jit_shell_float4_scalar_fallback_lanes, 24);
+        assert_eq!(stats.jit_shell_float4_same_segment_rate(), 12.0 / 18.0);
+        assert_eq!(stats.jit_shell_float4_avg_helper_batch(), 4.0);
+        assert_eq!(stats.jit_shell_float4_spill_restore_bytes, 300);
         assert_eq!(stats.shell_hull_profile2d_edges_bezier_hull_pruned, 78);
         assert_eq!(stats.shell_hull_profile2d_edge_distance_evaluations, 90);
         assert_eq!(
