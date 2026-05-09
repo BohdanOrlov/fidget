@@ -257,8 +257,6 @@ static GRAD_SLICE_HOT_LOOP_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 static JIT_SHELL_HELPER_CALLS: AtomicU64 = AtomicU64::new(0);
 static JIT_SHELL_HELPER_LANES: AtomicU64 = AtomicU64::new(0);
 static JIT_SHELL_POINT_HELPER_CALLS: AtomicU64 = AtomicU64::new(0);
-static JIT_SHELL_FLOAT4_HELPER_CALLS: AtomicU64 = AtomicU64::new(0);
-static JIT_SHELL_FLOAT4_HELPER_LANES: AtomicU64 = AtomicU64::new(0);
 static JIT_SHELL_INTERVAL_HELPER_CALLS: AtomicU64 = AtomicU64::new(0);
 static JIT_SHELL_GRAD_HELPER_CALLS: AtomicU64 = AtomicU64::new(0);
 static JIT_SHELL_FIXED_TOPOLOGY_HELPER_CANDIDATE_CALLS: AtomicU64 =
@@ -332,10 +330,7 @@ pub fn record_jit_shell_helper_call(
         ShellJitHelperKind::Point => {
             JIT_SHELL_POINT_HELPER_CALLS.fetch_add(1, Ordering::Relaxed);
         }
-        ShellJitHelperKind::Float4 => {
-            JIT_SHELL_FLOAT4_HELPER_CALLS.fetch_add(1, Ordering::Relaxed);
-            JIT_SHELL_FLOAT4_HELPER_LANES.fetch_add(lanes, Ordering::Relaxed);
-        }
+        ShellJitHelperKind::Float4 => {}
         ShellJitHelperKind::Interval => {
             JIT_SHELL_INTERVAL_HELPER_CALLS.fetch_add(1, Ordering::Relaxed);
         }
@@ -465,10 +460,6 @@ pub struct ShellEvalStats {
     pub jit_shell_helper_lanes: u64,
     /// Scalar point JIT native shell helper calls.
     pub jit_shell_point_helper_calls: u64,
-    /// Four-lane float-slice JIT native shell helper calls.
-    pub jit_shell_float4_helper_calls: u64,
-    /// Logical sample lanes processed by float4 JIT native shell helpers.
-    pub jit_shell_float4_helper_lanes: u64,
     /// Interval JIT native shell helper calls.
     pub jit_shell_interval_helper_calls: u64,
     /// Gradient JIT native shell helper calls.
@@ -560,8 +551,6 @@ pub fn reset_shell_eval_stats() {
     JIT_SHELL_HELPER_CALLS.store(0, Ordering::Relaxed);
     JIT_SHELL_HELPER_LANES.store(0, Ordering::Relaxed);
     JIT_SHELL_POINT_HELPER_CALLS.store(0, Ordering::Relaxed);
-    JIT_SHELL_FLOAT4_HELPER_CALLS.store(0, Ordering::Relaxed);
-    JIT_SHELL_FLOAT4_HELPER_LANES.store(0, Ordering::Relaxed);
     JIT_SHELL_INTERVAL_HELPER_CALLS.store(0, Ordering::Relaxed);
     JIT_SHELL_GRAD_HELPER_CALLS.store(0, Ordering::Relaxed);
     JIT_SHELL_FIXED_TOPOLOGY_HELPER_CANDIDATE_CALLS.store(0, Ordering::Relaxed);
@@ -678,10 +667,6 @@ pub fn shell_eval_stats() -> ShellEvalStats {
         jit_shell_helper_calls: JIT_SHELL_HELPER_CALLS.load(Ordering::Relaxed),
         jit_shell_helper_lanes: JIT_SHELL_HELPER_LANES.load(Ordering::Relaxed),
         jit_shell_point_helper_calls: JIT_SHELL_POINT_HELPER_CALLS
-            .load(Ordering::Relaxed),
-        jit_shell_float4_helper_calls: JIT_SHELL_FLOAT4_HELPER_CALLS
-            .load(Ordering::Relaxed),
-        jit_shell_float4_helper_lanes: JIT_SHELL_FLOAT4_HELPER_LANES
             .load(Ordering::Relaxed),
         jit_shell_interval_helper_calls: JIT_SHELL_INTERVAL_HELPER_CALLS
             .load(Ordering::Relaxed),
