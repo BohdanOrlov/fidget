@@ -9,6 +9,8 @@ pub const SHELL_MAX_NODES_PER_CURVE: usize = 16;
 /// Maximum segment candidates supported by fixed shell scratch buffers.
 pub const SHELL_MAX_CANDIDATES: usize =
     SHELL_MAX_CURVES * (SHELL_MAX_NODES_PER_CURVE - 1);
+const SHIP_PROFILE_BOW_CAP_EXTENSION: f32 = 0.0;
+const SHIP_PROFILE_STERN_CAP_EXTENSION: f32 = 0.0;
 
 /// Continuity control for a station profile node.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -606,8 +608,8 @@ impl ShellTopology {
             profile: Some(ShellProfileTopology {
                 sections: profile_sections,
                 segments: profile_segments,
-                bow_cap_extension: 0.03,
-                stern_cap_extension: 0.05,
+                bow_cap_extension: SHIP_PROFILE_BOW_CAP_EXTENSION,
+                stern_cap_extension: SHIP_PROFILE_STERN_CAP_EXTENSION,
                 cap_inset_scale: 0.20,
             }),
         }
@@ -920,12 +922,12 @@ fn compute_profile_bounds(
         }
     }
     bounds.include_point(
-        sections[0].station - 0.03 - extra,
+        sections[0].station - SHIP_PROFILE_BOW_CAP_EXTENSION - extra,
         -extra,
         sections[0].keel_z - extra,
     );
     bounds.include_point(
-        sections[sections.len() - 1].station + 0.05 + extra,
+        sections[sections.len() - 1].station + SHIP_PROFILE_STERN_CAP_EXTENSION + extra,
         extra,
         sections[sections.len() - 1].sheer_z + extra,
     );
