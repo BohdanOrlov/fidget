@@ -9,6 +9,8 @@ pub const SHELL_MAX_NODES_PER_CURVE: usize = 16;
 /// Maximum segment candidates supported by fixed shell scratch buffers.
 pub const SHELL_MAX_CANDIDATES: usize =
     SHELL_MAX_CURVES * (SHELL_MAX_NODES_PER_CURVE - 1);
+const SHIP_PROFILE_BOW_CAP_EXTENSION: f32 = 0.0;
+const SHIP_PROFILE_STERN_CAP_EXTENSION: f32 = 0.0;
 
 /// Continuity control for a station profile node.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -453,6 +455,9 @@ pub struct ShellProfileTopology {
     pub stern_cap_extension: f32,
     /// Inset amount applied to caps for inner shell evaluation.
     pub cap_inset_scale: f32,
+    /// Minimum lateral shell separation to preserve when inset profiles would
+    /// otherwise collapse onto the outer profile.
+    pub min_shell_thickness: f32,
 }
 
 /// Fixed-topology helper shape that can be targeted by future monomorphic JIT
@@ -606,11 +611,27 @@ impl ShellTopology {
             profile: Some(ShellProfileTopology {
                 sections: profile_sections,
                 segments: profile_segments,
-                bow_cap_extension: 0.03,
-                stern_cap_extension: 0.05,
+                bow_cap_extension: SHIP_PROFILE_BOW_CAP_EXTENSION,
+                stern_cap_extension: SHIP_PROFILE_STERN_CAP_EXTENSION,
                 cap_inset_scale: 0.20,
+                min_shell_thickness: 0.0,
             }),
         }
+    }
+
+    /// Sets a construction-time minimum thickness clamp for profile shell hulls.
+    ///
+    /// This is intentionally stored in the immutable topology sidecar so grid
+    /// construction samples the clamped shell without adding a GPU runtime
+    /// branch.
+    pub fn with_profile_min_shell_thickness(
+        mut self,
+        min_shell_thickness: f32,
+    ) -> Self {
+        if let Some(profile) = self.profile.as_mut() {
+            profile.min_shell_thickness = min_shell_thickness.max(0.0);
+        }
+        self
     }
     /// Returns conservative AABBs for each native shell segment.
     pub fn segment_bounds(&self) -> Box<[ShellBounds]> {
@@ -920,12 +941,14 @@ fn compute_profile_bounds(
         }
     }
     bounds.include_point(
-        sections[0].station - 0.03 - extra,
+        sections[0].station - SHIP_PROFILE_BOW_CAP_EXTENSION - extra,
         -extra,
         sections[0].keel_z - extra,
     );
     bounds.include_point(
-        sections[sections.len() - 1].station + 0.05 + extra,
+        sections[sections.len() - 1].station
+            + SHIP_PROFILE_STERN_CAP_EXTENSION
+            + extra,
         extra,
         sections[sections.len() - 1].sheer_z + extra,
     );

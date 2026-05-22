@@ -12,8 +12,9 @@ pub mod topology;
 
 pub use bounds::ShellBounds;
 pub use eval::{
-    ShellEvalScratch, ShellEvalStats, ShellJitHelperKind, ShellSample,
-    eval_shell_distance, eval_shell_distance4, eval_shell_grad,
+    ShellBranchSample, ShellEvalScratch, ShellEvalStats, ShellJitHelperKind,
+    ShellSample, eval_shell_branch_sample, eval_shell_distance,
+    eval_shell_distance4, eval_shell_grad,
     profile2d_outer_distance_batch_calls, record_jit_shell_helper_call,
     reset_profile2d_outer_distance_batch_calls, reset_shell_eval_stats,
     set_shell_eval_stats_enabled, shell_eval_stats,
