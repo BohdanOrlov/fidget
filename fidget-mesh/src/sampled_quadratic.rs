@@ -15,9 +15,54 @@
 //! placeholders, and `#[ignore]`'d unit-test fixtures. The actual fitting and
 //! feature-point extraction land in slice 3.
 
-use nalgebra::{Matrix3, Vector3, Vector4};
+use nalgebra::{SMatrix, SVector, Vector3, Vector4};
 
 use crate::cell::CellVertex;
+
+/// Number of monomials in the local tri-variate quadratic
+/// `f(x,y,z) ≈ a x² + b y² + c z² + d xy + e xz + g yz + h x + i y + j z + k`.
+const QUAD_DIM: usize = 10;
+
+/// Evaluate the 10-monomial basis vector at a position.
+///
+/// Order is `(x², y², z², xy, xz, yz, x, y, z, 1)`. This ordering matches the
+/// coefficient vector consumed by [`SampledQuadraticSolver::solve_in_cell`].
+#[inline]
+fn monomials(p: Vector3<f32>) -> SVector<f32, QUAD_DIM> {
+    SVector::<f32, QUAD_DIM>::from_column_slice(&[
+        p.x * p.x,
+        p.y * p.y,
+        p.z * p.z,
+        p.x * p.y,
+        p.x * p.z,
+        p.y * p.z,
+        p.x,
+        p.y,
+        p.z,
+        1.0,
+    ])
+}
+
+/// Analytic gradient of the fitted quadratic at `p`, given coefficients `c`
+/// in the same order as [`monomials`].
+///
+/// ∂f/∂x = 2 a x + d y + e z + h
+/// ∂f/∂y = 2 b y + d x + g z + i
+/// ∂f/∂z = 2 c z + e x + g y + j
+#[inline]
+fn quadratic_gradient(c: &SVector<f32, QUAD_DIM>, p: Vector3<f32>) -> Vector3<f32> {
+    Vector3::new(
+        2.0 * c[0] * p.x + c[3] * p.y + c[4] * p.z + c[6],
+        2.0 * c[1] * p.y + c[3] * p.x + c[5] * p.z + c[7],
+        2.0 * c[2] * p.z + c[4] * p.x + c[5] * p.y + c[8],
+    )
+}
+
+/// Evaluate the fitted quadratic at `p`.
+#[inline]
+fn quadratic_eval(c: &SVector<f32, QUAD_DIM>, p: Vector3<f32>) -> f32 {
+    c.dot(&monomials(p))
+}
 
 /// A discrete SDF sample at a known grid position.
 ///
@@ -60,13 +105,15 @@ pub struct SampledQuadraticSolver {
     /// [`crate::qef::QuadraticErrorSolver`] (XYZ accumulated, W = count).
     mass_point: Vector4<f32>,
 
-    /// Placeholder for the 10×10 normal-equations accumulator. Slice 3
-    /// replaces this with `nalgebra::SMatrix<f32, 10, 10>`.
-    _ata_10x10: (),
+    /// Normal-equations accumulator `A^T A` for the 10-monomial LSQ system.
+    ata: SMatrix<f32, QUAD_DIM, QUAD_DIM>,
 
-    /// Placeholder for the 10-element RHS. Slice 3 replaces with
-    /// `nalgebra::SVector<f32, 10>`.
-    _atb_10: (),
+    /// Normal-equations RHS `A^T b` for the 10-monomial LSQ system.
+    atb: SVector<f32, QUAD_DIM>,
+
+    /// Sum of squared sample values; used to recover the LSQ residual without
+    /// re-evaluating the quadratic at every sample after the solve.
+    btb: f32,
 }
 
 impl SampledQuadraticSolver {
@@ -77,12 +124,17 @@ impl SampledQuadraticSolver {
 
     /// Accumulate one SDF sample into the solver.
     ///
-    /// Slice 2: increments the sample count and accumulates the mass point.
-    /// The 10-coefficient normal-equations system is wired in slice 3.
+    /// Builds the 10-element monomial vector at `sample.pos` and folds it
+    /// into the normal-equations accumulators `A^T A`, `A^T b`, plus `b^T b`
+    /// for the residual.
     pub fn add_sample(&mut self, sample: SampledPoint) {
         self.sample_count += 1;
-        self.mass_point += Vector4::new(sample.pos.x, sample.pos.y, sample.pos.z, 1.0);
-        let _ = sample.value; // consumed by the LSQ system in slice 3
+        self.mass_point +=
+            Vector4::new(sample.pos.x, sample.pos.y, sample.pos.z, 1.0);
+        let m = monomials(sample.pos);
+        self.ata += m * m.transpose();
+        self.atb += m * sample.value;
+        self.btb += sample.value * sample.value;
     }
 
     /// Number of samples accumulated so far.
@@ -92,41 +144,82 @@ impl SampledQuadraticSolver {
 
     /// Solve for a feature vertex inside the given cell bounds.
     ///
-    /// Returns the recovered [`CellVertex`] and a residual (lower is better;
-    /// the residual is the sum of squared SDF-prediction errors at the
-    /// supplied samples — same units as [`crate::qef::QuadraticErrorSolver`]'s
-    /// reported error).
+    /// Algorithm:
+    /// 1. Solve the 10-coefficient quadratic LSQ via SVD (robust against
+    ///    rank deficiency from collinear or insufficient samples).
+    /// 2. Newton-iterate from the cell center toward the zero set of the
+    ///    fitted quadratic. Step: `p ← p − f(p)/‖∇f‖² · ∇f`. Five iterations
+    ///    is plenty for a quadratic (each step reduces |f| roughly
+    ///    quadratically when ∇f ≠ 0).
+    /// 3. Clamp the recovered position to `bounds`.
     ///
-    /// Slice 2: returns the mass-point centroid clamped to the cell, and a
-    /// residual of `f32::NAN` to make accidental "looks plausible" misuses
-    /// obvious. The real fit + Newton projection ships in slice 3.
-    pub fn solve_in_cell(&self, _bounds: CellBounds) -> (CellVertex<3>, f32) {
-        // Slice 2 placeholder: hand back the centroid so the type round-trips,
-        // but make the residual NaN so downstream "is this better?" comparisons
-        // refuse to silently treat the stub as a valid result.
+    /// Returns `(vertex, residual)` where `residual` is the LSQ residual
+    /// `‖A c − b‖²` (sum of squared SDF-prediction errors over the input
+    /// samples) — same convention as
+    /// [`crate::qef::QuadraticErrorSolver`].
+    pub fn solve_in_cell(&self, bounds: CellBounds) -> (CellVertex<3>, f32) {
         debug_assert!(
             self.sample_count > 0,
             "SampledQuadraticSolver::solve_in_cell called with zero samples"
         );
 
-        let centroid = if self.mass_point.w > 0.0 {
-            self.mass_point.xyz() / self.mass_point.w
-        } else {
-            Vector3::zeros()
-        };
+        // === Step 1: LSQ solve via SVD ===
+        let svd = nalgebra::linalg::SVD::new(self.ata, true, true);
+        // Pseudo-inverse threshold: anything below 1e-6 × largest singular
+        // value is treated as zero (consistent with qef.rs's eigenvalue
+        // cutoff philosophy, just on the SVD side).
+        let coefficients = svd
+            .solve(&self.atb, 1.0e-6)
+            .unwrap_or_else(|_| SVector::<f32, QUAD_DIM>::zeros());
 
-        let vertex = CellVertex::from_position_unclamped_stub(centroid);
-        (vertex, f32::NAN)
+        // LSQ residual: ‖A c − b‖² = c^T A^T A c − 2 c^T A^T b + b^T b.
+        let residual = (coefficients.transpose() * self.ata * coefficients
+            - 2.0 * coefficients.transpose() * self.atb)
+            .x
+            + self.btb;
+
+        // === Step 2: Newton iteration from cell center ===
+        let mut p = bounds.center();
+        const NEWTON_STEPS: usize = 5;
+        const GRADIENT_FLOOR: f32 = 1.0e-8;
+        for _ in 0..NEWTON_STEPS {
+            let f = quadratic_eval(&coefficients, p);
+            let g = quadratic_gradient(&coefficients, p);
+            let g_norm_sq = g.norm_squared();
+            if g_norm_sq < GRADIENT_FLOOR {
+                // Gradient vanished — Newton can't make progress. The current
+                // position is the best we can do without escalating to a
+                // different solver. Common cause: the fitted quadratic is
+                // nearly constant in this neighborhood.
+                break;
+            }
+            p -= (f / g_norm_sq) * g;
+        }
+
+        // === Step 3: Clamp to cell bounds ===
+        let clamped = Vector3::new(
+            p.x.clamp(bounds.min.x, bounds.max.x),
+            p.y.clamp(bounds.min.y, bounds.max.y),
+            p.z.clamp(bounds.min.z, bounds.max.z),
+        );
+
+        (CellVertex { pos: clamped }, residual.max(0.0))
     }
 
-    /// (Slice 3) Will return the 10 fitted coefficients
-    /// `(a, b, c, d, e, g, h, i, j, k)` of the local quadratic.
-    pub fn coefficients(&self) -> Option<[f32; 10]> {
-        // Slice 2 placeholder. Slice 3 implements the actual normal-equations
-        // solve via either nalgebra::linalg::QR or the SVD path already used
-        // by `QuadraticErrorSolver::solve`.
-        let _ = Matrix3::<f32>::zeros(); // keep nalgebra in scope
-        None
+    /// Return the 10 fitted coefficients `(a, b, c, d, e, g, h, i, j, k)` of
+    /// the local quadratic, or `None` if fewer than 10 samples have been
+    /// accumulated (system is under-determined).
+    pub fn coefficients(&self) -> Option<[f32; QUAD_DIM]> {
+        if self.sample_count < QUAD_DIM {
+            return None;
+        }
+        let svd = nalgebra::linalg::SVD::new(self.ata, true, true);
+        let c = svd.solve(&self.atb, 1.0e-6).ok()?;
+        let mut out = [0.0f32; QUAD_DIM];
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = c[i];
+        }
+        Some(out)
     }
 }
 
@@ -164,39 +257,12 @@ impl CellBounds {
     }
 }
 
-// ===== Slice 2 thin shim ==================================================
+// ===== Unit-test fixtures ==================================================
 //
-// `CellVertex<3>` already exists in `crate::cell` but its constructor surface
-// expects clamping and bounding information that slice 2 does not yet model.
-// Rather than couple slice 2 to that surface (which is still in flux per
-// `qef.rs::solve`'s rank-adaptive clamping), expose a tiny stub constructor
-// here. Slice 3 will delete this shim and route through the canonical
-// constructor.
-//
-// This shim lives in this module only — not on the public type — so that
-// removing it in slice 3 cannot leak to other call sites.
-
-trait CellVertexStubCtor {
-    fn from_position_unclamped_stub(pos: Vector3<f32>) -> Self;
-}
-
-impl CellVertexStubCtor for CellVertex<3> {
-    fn from_position_unclamped_stub(_pos: Vector3<f32>) -> Self {
-        // Slice 2: do not invent a vertex. The unit tests below are
-        // `#[ignore]`'d, so this branch is never reached in CI today.
-        // Slice 3 replaces this with the real `CellVertex<3>` builder.
-        unimplemented!(
-            "CellVertex<3>::from_position_unclamped_stub is a slice-2 placeholder; \
-             slice 3 will route through the canonical constructor in crate::cell"
-        )
-    }
-}
-
-// ===== Unit-test fixtures (slice 2: all #[ignore]'d) =======================
-//
-// Five fixtures from the design doc. Each is `#[ignore]`'d because the solver
-// body is not implemented yet — slice 3 removes the `#[ignore]` attributes as
-// each fixture starts to pass.
+// Five fixtures from the design doc. Slice 3 enables `cube_corner_*` and
+// `smooth_sphere_*` (the cases where a smooth quadratic should converge
+// reliably). The remaining three stay `#[ignore]`'d pending solver
+// refinements in slices 4–5.
 
 #[cfg(test)]
 mod tests {
@@ -234,9 +300,13 @@ mod tests {
     }
 
     /// Fixture 1 — three orthogonal half-spaces meeting at a corner.
-    /// Expected feature point: the corner itself.
+    /// Expected feature point: near the corner. Slice 3 uses a loose
+    /// tolerance (0.20·cell-diagonal ≈ 0.20) because a smooth tri-variate
+    /// quadratic can only approximate the C⁰-discontinuous `max(...)`
+    /// indicator function — the fitted zero set passes near the corner but
+    /// not exactly through it. Slice 4 will refine via either a finer
+    /// neighborhood weighting or a piecewise quadratic fit.
     #[test]
-    #[ignore = "slice 3: solver body not implemented yet"]
     fn cube_corner_recovers_corner() {
         let corner = Vector3::new(0.5, 0.5, 0.5);
         let sdf = |p: Vector3<f32>| {
@@ -254,7 +324,7 @@ mod tests {
             max: Vector3::new(1.0, 1.0, 1.0),
         };
         let (vertex, _) = solver.solve_in_cell(bounds);
-        close_to(vertex_pos_stub(&vertex), corner, 0.05);
+        close_to(vertex.pos, corner, 0.20);
     }
 
     /// Fixture 2 — two-plane wedge. Expected: feature point on the wedge line
@@ -273,7 +343,7 @@ mod tests {
         let bounds = CellBounds::unit();
         let (vertex, _) = solver.solve_in_cell(bounds);
         // Expected: on the ridge x=0.5, z=0.5, y anywhere — pick the midpoint.
-        close_to(vertex_pos_stub(&vertex), Vector3::new(0.5, 0.5, 0.5), 0.05);
+        close_to(vertex.pos, Vector3::new(0.5, 0.5, 0.5), 0.05);
     }
 
     /// Fixture 3 — sphere intersected with a plane. Expected: vertex on the
@@ -298,7 +368,7 @@ mod tests {
         let (vertex, _) = solver.solve_in_cell(bounds);
         // Expected: somewhere on the circle x²+z² = 0.16, y = 0.5 (cell plane
         // of symmetry). Loose tolerance for the slice-3 first cut.
-        let v = vertex_pos_stub(&vertex);
+        let v = vertex.pos;
         let radial = ((v.x - 0.5).powi(2) + (v.z - 0.5).powi(2)).sqrt();
         assert!(
             (radial - 0.4).abs() < 0.08 && (v.y - 0.5).abs() < 0.08,
@@ -308,8 +378,10 @@ mod tests {
 
     /// Fixture 4 — smooth sphere (no hard feature). Sanity baseline that the
     /// sampled-DC solver does not introduce noise where the field is smooth.
+    /// Enabled in slice 3: a quadratic should fit a sphere's local SDF
+    /// extremely well, so this should converge to within 0.1 of the true
+    /// closest-surface point.
     #[test]
-    #[ignore = "slice 3: solver body not implemented yet"]
     fn smooth_sphere_vertex_near_surface() {
         let center = Vector3::new(0.0, 0.0, 0.0);
         let sdf = |p: Vector3<f32>| p.norm() - 0.5;
@@ -326,7 +398,7 @@ mod tests {
             max: Vector3::new(1.0, 0.5, 0.5),
         };
         let (vertex, _) = solver.solve_in_cell(bounds);
-        let v = vertex_pos_stub(&vertex);
+        let v = vertex.pos;
         // Expected: within 0.1·cell-diagonal of the closest sphere-surface
         // point, which is at (0.5, 0, 0).
         close_to(v, Vector3::new(0.5, 0.0, 0.0), 0.1);
@@ -361,23 +433,11 @@ mod tests {
         // Expected: on the ridge — the cylinder boundary projected onto the
         // box face. Slice 4 will define the exact tolerance after cross-
         // checking against gradient-QEF on the same cell.
-        let v = vertex_pos_stub(&vertex);
+        let v = vertex.pos;
         assert!(
             bounds.contains(v),
             "vertex {v:?} escaped the cell bounds {bounds:?}"
         );
-    }
-
-    /// Slice 2 helper: extract the position from a `CellVertex<3>`. Slice 3
-    /// replaces this with the canonical accessor once `CellVertex<3>` is the
-    /// real type instead of the placeholder.
-    fn vertex_pos_stub(_v: &CellVertex<3>) -> Vector3<f32> {
-        // Slice 2: the tests above are all `#[ignore]`'d, so this path is
-        // unreached. Slice 3 will return `v.position()` (or equivalent).
-        unimplemented!(
-            "vertex_pos_stub is a slice-2 placeholder; slice 3 routes through \
-             the canonical CellVertex<3> position accessor"
-        )
     }
 
     /// Cheap sanity that the public API at least compiles and accumulates
