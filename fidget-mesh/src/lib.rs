@@ -52,6 +52,7 @@ mod frame;
 mod octree;
 mod output;
 mod qef;
+mod sampled_quadratic;
 
 use fidget_core::render::{CancelToken, ThreadPool};
 
