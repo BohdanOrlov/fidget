@@ -53,6 +53,7 @@ mod octree;
 mod output;
 mod qef;
 mod sampled_quadratic;
+mod sdf_normal;
 
 use fidget_core::render::{CancelToken, ThreadPool};
 
@@ -80,6 +81,23 @@ impl Mesh {
     }
 }
 
+/// Vertex-placement solver used while building the dual-contouring octree.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum MeshSolver {
+    /// Existing Hermite-data QEF placement, using analytic gradients at edge
+    /// intersections.
+    #[default]
+    HermiteQef,
+
+    /// Experimental P38.15 sampled-SDF quadratic placement.
+    ///
+    /// This fits a local quadratic from SDF samples in each active leaf cell,
+    /// then projects the leaf vertex onto the fitted zero set. It remains
+    /// opt-in because it is a prototype path for evaluating sampled signed
+    /// distance data without analytic gradient access.
+    SampledDc,
+}
+
 /// Settings when building an octree and mesh
 pub struct Settings<'a> {
     /// Depth to recurse in the octree
@@ -96,6 +114,9 @@ pub struct Settings<'a> {
 
     /// Token to cancel rendering
     pub cancel: CancelToken,
+
+    /// Vertex-placement solver.
+    pub mesh_solver: MeshSolver,
 }
 
 impl Default for Settings<'_> {
@@ -105,6 +126,7 @@ impl Default for Settings<'_> {
             world_to_model: nalgebra::Matrix4::identity(),
             threads: Some(&ThreadPool::Global),
             cancel: CancelToken::new(),
+            mesh_solver: MeshSolver::HermiteQef,
         }
     }
 }
