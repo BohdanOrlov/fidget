@@ -11,9 +11,9 @@
 //!
 //! ## Status
 //!
-//! Slice 2 of 5: this file contains the public API skeleton, internal
-//! placeholders, and `#[ignore]`'d unit-test fixtures. The actual fitting and
-//! feature-point extraction land in slice 3.
+//! Slice 4 status: the solver has a real LSQ fit, Newton projection, and an
+//! opt-in octree integration path. Some hard-feature fixtures remain ignored
+//! until the weighting or piecewise-fit refinement is selected.
 
 use nalgebra::{SMatrix, SVector, Vector3, Vector4};
 
@@ -50,7 +50,10 @@ fn monomials(p: Vector3<f32>) -> SVector<f32, QUAD_DIM> {
 /// ∂f/∂y = 2 b y + d x + g z + i
 /// ∂f/∂z = 2 c z + e x + g y + j
 #[inline]
-fn quadratic_gradient(c: &SVector<f32, QUAD_DIM>, p: Vector3<f32>) -> Vector3<f32> {
+fn quadratic_gradient(
+    c: &SVector<f32, QUAD_DIM>,
+    p: Vector3<f32>,
+) -> Vector3<f32> {
     Vector3::new(
         2.0 * c[0] * p.x + c[3] * p.y + c[4] * p.z + c[6],
         2.0 * c[1] * p.y + c[3] * p.x + c[5] * p.z + c[7],
@@ -209,6 +212,7 @@ impl SampledQuadraticSolver {
     /// Return the 10 fitted coefficients `(a, b, c, d, e, g, h, i, j, k)` of
     /// the local quadratic, or `None` if fewer than 10 samples have been
     /// accumulated (system is under-determined).
+    #[allow(dead_code)]
     pub fn coefficients(&self) -> Option<[f32; QUAD_DIM]> {
         if self.sample_count < QUAD_DIM {
             return None;
@@ -236,6 +240,7 @@ pub struct CellBounds {
 }
 
 impl CellBounds {
+    #[allow(dead_code)]
     pub fn unit() -> Self {
         Self {
             min: Vector3::new(0.0, 0.0, 0.0),
@@ -247,6 +252,7 @@ impl CellBounds {
         (self.min + self.max) * 0.5
     }
 
+    #[allow(dead_code)]
     pub fn contains(&self, p: Vector3<f32>) -> bool {
         p.x >= self.min.x
             && p.y >= self.min.y
@@ -280,7 +286,11 @@ mod tests {
             for iy in -1i32..=1 {
                 for ix in -1i32..=1 {
                     let pos = center
-                        + Vector3::new(ix as f32 * step, iy as f32 * step, iz as f32 * step);
+                        + Vector3::new(
+                            ix as f32 * step,
+                            iy as f32 * step,
+                            iz as f32 * step,
+                        );
                     let value = sdf(pos);
                     out.push(SampledPoint { pos, value });
                 }
@@ -330,7 +340,7 @@ mod tests {
     /// Fixture 2 — two-plane wedge. Expected: feature point on the wedge line
     /// midway across the cell.
     #[test]
-    #[ignore = "slice 3: solver body not implemented yet"]
+    #[ignore = "pending hard-feature weighting or piecewise-fit refinement"]
     fn two_plane_wedge_recovers_ridge_midpoint() {
         // Wedge along the y axis: max(x - 0.5, z - 0.5)
         let sdf = |p: Vector3<f32>| (p.x - 0.5).max(p.z - 0.5);
@@ -349,7 +359,7 @@ mod tests {
     /// Fixture 3 — sphere intersected with a plane. Expected: vertex on the
     /// intersection circle, in the cell's plane of symmetry.
     #[test]
-    #[ignore = "slice 3: solver body not implemented yet"]
+    #[ignore = "pending hard-feature weighting or piecewise-fit refinement"]
     fn sphere_plane_intersection_on_circle() {
         let center = Vector3::new(0.5, 0.5, 0.5);
         // Sphere of radius 0.4 intersected with the half-space y >= 0.5.
@@ -383,7 +393,6 @@ mod tests {
     /// closest-surface point.
     #[test]
     fn smooth_sphere_vertex_near_surface() {
-        let center = Vector3::new(0.0, 0.0, 0.0);
         let sdf = |p: Vector3<f32>| p.norm() - 0.5;
         // Cell that straddles the surface along +x.
         let cell_center = Vector3::new(0.5, 0.0, 0.0);
@@ -407,13 +416,13 @@ mod tests {
     /// Fixture 5 — boolean subtraction creating a sharp ridge. Cross-check
     /// against the gradient-QEF baseline (run that comparison in slice 4).
     #[test]
-    #[ignore = "slice 3: solver body not implemented yet"]
+    #[ignore = "pending hard-feature weighting or piecewise-fit refinement"]
     fn boolean_subtraction_ridge() {
         // A box minus a cylinder hole through it — creates a sharp ridge on
         // the box face where the cylinder exits.
         let sdf = |p: Vector3<f32>| {
-            let box_sdf = (p.x.abs() - 0.4)
-                .max((p.y.abs() - 0.4).max(p.z.abs() - 0.4));
+            let box_sdf =
+                (p.x.abs() - 0.4).max((p.y.abs() - 0.4).max(p.z.abs() - 0.4));
             let cyl_radius = (p.x.powi(2) + p.y.powi(2)).sqrt() - 0.2;
             box_sdf.max(-cyl_radius)
         };

@@ -1,13 +1,16 @@
 //! An octree data structure and implementation of Manifold Dual Contouring
 
 use super::{
-    Mesh, Settings,
     builder::MeshBuilder,
     cell::{Cell, CellIndex, CellVertex, Leaf},
     codegen::CELL_TO_VERT_TO_EDGES,
     frame::Frame,
     qef::QuadraticErrorSolver,
-    types::{Axis, CellMask, Corner, Edge},
+    sampled_quadratic::{
+        CellBounds as SampledCellBounds, SampledPoint, SampledQuadraticSolver,
+    },
+    types::{Axis, CellMask, Corner, Edge, X, Y, Z},
+    Mesh, MeshSolver, Settings,
 };
 use fidget_core::{
     eval::Function,
@@ -95,10 +98,11 @@ impl Octree {
                 settings.depth,
                 &settings.cancel,
                 threads,
+                settings.mesh_solver,
             )
         } else {
             let mut eval = RenderHandle::new(shape.clone());
-            let mut out = OctreeBuilder::new();
+            let mut out = OctreeBuilder::new(settings.mesh_solver);
             let mut hermite = LeafHermiteData::default();
             if out.recurse(
                 &mut eval,
@@ -122,6 +126,7 @@ impl Octree {
         max_depth: u8,
         cancel: &CancelToken,
         threads: &ThreadPool,
+        mesh_solver: MeshSolver,
     ) -> Option<Self> {
         let mut root = Octree::new();
         let mut todo = VecDeque::new();
@@ -160,7 +165,7 @@ impl Octree {
         let out = threads.run(|| {
             todo.par_iter()
                 .map_init(
-                    || (OctreeBuilder::new(), rh.clone()),
+                    || (OctreeBuilder::new(mesh_solver), rh.clone()),
                     |(builder, eval), cell| {
                         let mut hermite = LeafHermiteData::default();
                         // Patch our cell so that it builds at index 0
@@ -229,15 +234,19 @@ impl Octree {
 
         // Walk back up the tree, merging cells as we go
         for (cell, index) in fixup.into_iter().rev() {
-            let h = hermites[index];
-            root[cell] = root.check_done(
-                cell,
-                index,
-                h,
-                cell.index
-                    .map(|(i, j)| &mut hermites[i][j as usize])
-                    .unwrap_or(&mut LeafHermiteData::default()),
-            );
+            root[cell] = if mesh_solver == MeshSolver::SampledDc {
+                Cell::Branch { index }
+            } else {
+                let h = hermites[index];
+                root.check_done(
+                    cell,
+                    index,
+                    h,
+                    cell.index
+                        .map(|(i, j)| &mut hermites[i][j as usize])
+                        .unwrap_or(&mut LeafHermiteData::default()),
+                )
+            };
         }
         Some(root)
     }
@@ -502,6 +511,7 @@ pub(crate) struct OctreeBuilder<F: Function + RenderHints> {
     eval_float_slice: ShapeBulkEval<F::FloatSliceEval>,
     eval_interval: ShapeTracingEval<F::IntervalEval>,
     eval_grad_slice: ShapeBulkEval<F::GradSliceEval>,
+    mesh_solver: MeshSolver,
 
     tape_storage: Vec<F::TapeStorage>,
     shape_storage: Vec<F::Storage>,
@@ -510,18 +520,19 @@ pub(crate) struct OctreeBuilder<F: Function + RenderHints> {
 
 impl<F: Function + RenderHints> Default for OctreeBuilder<F> {
     fn default() -> Self {
-        Self::new()
+        Self::new(MeshSolver::HermiteQef)
     }
 }
 
 impl<F: Function + RenderHints> OctreeBuilder<F> {
     /// Builds a new octree builder, which allocates data for 8 root cells
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(mesh_solver: MeshSolver) -> Self {
         Self {
             octree: Octree::new(),
             eval_float_slice: Shape::<F>::new_float_slice_eval(),
             eval_grad_slice: Shape::<F>::new_grad_slice_eval(),
             eval_interval: Shape::<F>::new_interval_eval(),
+            mesh_solver,
             tape_storage: vec![],
             shape_storage: vec![],
             workspace: Default::default(),
@@ -600,10 +611,79 @@ impl<F: Function + RenderHints> OctreeBuilder<F> {
                 }
 
                 // Figure out whether the children can be collapsed
-                self.octree.check_done(cell, index, hermite_child, hermite)
+                if self.mesh_solver == MeshSolver::SampledDc {
+                    // Keep sampled-DC placement on max-depth leaves for now:
+                    // parent-cell collapse still solves a Hermite QEF and
+                    // would otherwise replace the sampled vertex position.
+                    Cell::Branch { index }
+                } else {
+                    self.octree.check_done(cell, index, hermite_child, hermite)
+                }
             }
         };
         true
+    }
+
+    fn sampled_quadratic_cell_vertex<T>(
+        &mut self,
+        eval: &mut RenderHandle<F, T>,
+        vars: &ShapeVars<f32>,
+        cell: CellIndex<3>,
+    ) -> Option<(CellVertex<3>, f32)> {
+        const SAMPLE_COUNT: usize = 27;
+        let mut xs = [0.0f32; SAMPLE_COUNT];
+        let mut ys = [0.0f32; SAMPLE_COUNT];
+        let mut zs = [0.0f32; SAMPLE_COUNT];
+
+        let bx = cell.bounds[X];
+        let by = cell.bounds[Y];
+        let bz = cell.bounds[Z];
+        let x_samples = [bx.lower(), bx.midpoint(), bx.upper()];
+        let y_samples = [by.lower(), by.midpoint(), by.upper()];
+        let z_samples = [bz.lower(), bz.midpoint(), bz.upper()];
+
+        let mut i = 0;
+        for z in z_samples {
+            for y in y_samples {
+                for x in x_samples {
+                    xs[i] = x;
+                    ys[i] = y;
+                    zs[i] = z;
+                    i += 1;
+                }
+            }
+        }
+        debug_assert_eq!(i, SAMPLE_COUNT);
+
+        let values = self
+            .eval_float_slice
+            .eval_v(eval.f_tape(&mut self.tape_storage), &xs, &ys, &zs, vars)
+            .ok()?;
+        debug_assert_eq!(values.len(), SAMPLE_COUNT);
+
+        let mut solver = SampledQuadraticSolver::new();
+        for ((&x, &y), (&z, &value)) in
+            xs.iter().zip(ys.iter()).zip(zs.iter().zip(values.iter()))
+        {
+            if x.is_finite()
+                && y.is_finite()
+                && z.is_finite()
+                && value.is_finite()
+            {
+                solver.add_sample(SampledPoint {
+                    pos: nalgebra::Vector3::new(x, y, z),
+                    value,
+                });
+            }
+        }
+        if solver.sample_count() < 10 {
+            return None;
+        }
+
+        Some(solver.solve_in_cell(SampledCellBounds {
+            min: nalgebra::Vector3::new(bx.lower(), by.lower(), bz.lower()),
+            max: nalgebra::Vector3::new(bx.upper(), by.upper(), bz.upper()),
+        }))
     }
 
     /// Evaluates the given leaf
@@ -650,6 +730,13 @@ impl<F: Function + RenderHints> OctreeBuilder<F> {
         }
 
         let mask = CellMask::new(mask);
+        let sampled_cell_vertex = if self.mesh_solver == MeshSolver::SampledDc
+            && CELL_TO_VERT_TO_EDGES[mask.index()].len() == 1
+        {
+            self.sampled_quadratic_cell_vertex(eval, vars, cell)
+        } else {
+            None
+        };
 
         // Start and endpoints in 3D space for intersection searches
         let mut start = [nalgebra::Vector3::zeros(); 12];
@@ -834,6 +921,9 @@ impl<F: Function + RenderHints> OctreeBuilder<F> {
 
             if let Some(pos) = force_point {
                 verts.push(CellVertex { pos });
+            } else if let Some((pos, err)) = sampled_cell_vertex {
+                verts.push(pos);
+                hermite_cell.qef_err = err.max(1e-6);
             } else {
                 let (pos, err) = qef.solve();
                 verts.push(pos);
@@ -1059,6 +1149,13 @@ mod test {
         }
     }
 
+    fn depth1_sampled_dc_single_thread() -> Settings<'static> {
+        Settings {
+            mesh_solver: MeshSolver::SampledDc,
+            ..depth1_single_thread()
+        }
+    }
+
     fn sphere(center: [f32; 3], radius: f32) -> Tree {
         let (x, y, z) = Tree::axes();
         ((x - center[0]).square()
@@ -1215,6 +1312,20 @@ mod test {
 
             check_for_vertex_dupes(&sphere_mesh).unwrap();
             check_for_edge_matching(&sphere_mesh).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_sampled_dc_mesh_basic() {
+        let shape = VmShape::from(sphere([0.0; 3], 0.2));
+        let octree =
+            Octree::build(&shape, &depth1_sampled_dc_single_thread()).unwrap();
+        let sphere_mesh = octree.walk_dual();
+
+        assert!(!sphere_mesh.vertices.is_empty());
+        assert!(!sphere_mesh.triangles.is_empty());
+        for v in &sphere_mesh.vertices {
+            assert!(v.iter().all(|f| f.is_finite()), "invalid vertex {v:?}");
         }
     }
 

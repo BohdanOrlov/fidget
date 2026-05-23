@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{bail, Context as _, Result};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use env_logger::Env;
 use log::info;
@@ -138,6 +138,22 @@ enum RenderMode2D {
     Brute,
 }
 
+#[derive(ValueEnum, Copy, Clone, Default, Debug)]
+enum MeshSolverArg {
+    #[default]
+    HermiteQef,
+    SampledDc,
+}
+
+impl From<MeshSolverArg> for fidget::mesh::MeshSolver {
+    fn from(value: MeshSolverArg) -> Self {
+        match value {
+            MeshSolverArg::HermiteQef => Self::HermiteQef,
+            MeshSolverArg::SampledDc => Self::SampledDc,
+        }
+    }
+}
+
 #[derive(Parser)]
 struct ImageSettings {
     #[clap(flatten)]
@@ -203,6 +219,10 @@ struct MeshSettings {
         value_parser = parse_vec3
     )]
     center: [f32; 3],
+
+    /// Vertex-placement solver
+    #[clap(long = "mesh-solver", value_enum, default_value_t)]
+    mesh_solver: MeshSolverArg,
 }
 
 #[derive(Parser)]
@@ -578,6 +598,7 @@ fn run_mesh<F: fidget::eval::Function + fidget::render::RenderHints>(
             depth: settings.depth,
             threads,
             world_to_model,
+            mesh_solver: settings.mesh_solver.into(),
             ..Default::default()
         };
         let start = std::time::Instant::now();
