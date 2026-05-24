@@ -188,6 +188,23 @@ pub struct ShellSample {
     pub segment: usize,
 }
 
+/// Outer/inner branch distances and gradients for a native shell sample.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShellBranchSample {
+    /// Distance to the outer hull surface branch.
+    pub outer_distance: f32,
+    /// Distance to the inner shell surface branch before sign inversion.
+    pub inner_distance: f32,
+    /// Composed shell distance, equivalent to regular shell evaluation.
+    pub distance: f32,
+    /// Closest segment index used for the composed shell sample.
+    pub segment: usize,
+    /// Gradient of `outer_distance`.
+    pub outer_gradient: [f32; 3],
+    /// Gradient of `inner_distance`.
+    pub inner_gradient: [f32; 3],
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ShellGradientSample {
     distance: f32,
@@ -939,6 +956,60 @@ pub fn eval_shell_distance(
     }
 }
 
+/// Evaluates native shell branch distances at one point.
+///
+/// For profile shell hulls this returns exact outer and inner branch distances
+/// before the shell composition `max(outer, -inner)`. Other shell kinds fall
+/// back to the composed shell distance in both lanes.
+#[inline(always)]
+pub fn eval_shell_branch_sample(
+    topology: &ShellTopology,
+    params: ShellParamsView<'_>,
+    scratch: &mut ShellEvalScratch,
+    x: f32,
+    y: f32,
+    z: f32,
+) -> ShellBranchSample {
+    let mut sample = if topology.kind == ShellOpKind::ShellHull
+        && params.is_empty()
+        && let Some(profile) = topology.profile.as_ref()
+    {
+        eval_profile_shell_hull_branches(topology, profile, scratch, x, y, z)
+    } else {
+        let composed =
+            eval_shell_gradient_sample(topology, params, scratch, x, y, z);
+        ShellBranchSample {
+            outer_distance: composed.distance,
+            inner_distance: -composed.distance,
+            distance: composed.distance,
+            segment: composed.segment,
+            outer_gradient: composed.gradient,
+            inner_gradient: [
+                -composed.gradient[0],
+                -composed.gradient[1],
+                -composed.gradient[2],
+            ],
+        }
+    };
+
+    if let OpenTopPolicy::BoxCut {
+        cut_z,
+        half_length,
+        half_width,
+        offset_x,
+    } = topology.open_top
+    {
+        let x_window = (x - offset_x).abs() - half_length;
+        let y_window = y.abs() - half_width;
+        let z_cut = cut_z - z;
+        let opening = z_cut.max(x_window).max(y_window);
+        sample.distance = sample.distance.max(-opening);
+    }
+
+    scratch.closest_segment = Some(sample.segment);
+    sample
+}
+
 /// Evaluates four native shell distances as one packet.
 ///
 /// The profile-shell fast path keeps the same scalar distance contract, but
@@ -1376,6 +1447,80 @@ fn eval_profile_shell_hull_gradient(
                 distance: sample.distance,
                 segment: index,
                 gradient: sample.gradient,
+            };
+        }
+    }
+
+    best
+}
+
+#[inline(always)]
+fn eval_profile_shell_hull_branches(
+    topology: &ShellTopology,
+    profile: &ShellProfileTopology,
+    scratch: &mut ShellEvalScratch,
+    x: f32,
+    y: f32,
+    z: f32,
+) -> ShellBranchSample {
+    let mut best = ShellBranchSample {
+        outer_distance: f32::INFINITY,
+        inner_distance: f32::INFINITY,
+        distance: f32::INFINITY,
+        segment: 0,
+        outer_gradient: [0.0, 0.0, 1.0],
+        inner_gradient: [0.0, 0.0, 1.0],
+    };
+
+    record_profile2d_station_lookup_call();
+    for &index in
+        scratch.collect_point_candidates(topology, ShellParamsView::empty(), x)
+    {
+        let segment = profile.segments[index.min(profile.segments.len() - 1)];
+        let outer = eval_profile_solid_gradient(
+            profile,
+            segment,
+            0.0,
+            x,
+            y,
+            z,
+            Profile2dShellSide::Outer,
+        );
+        let thickness = topology.shell_thickness.max(0.0);
+        let inner = if thickness <= 1.0e-6 {
+            ShellGradientSample {
+                distance: -outer.distance,
+                segment: index,
+                gradient: [
+                    -outer.gradient[0],
+                    -outer.gradient[1],
+                    -outer.gradient[2],
+                ],
+            }
+        } else {
+            eval_profile_solid_gradient(
+                profile,
+                segment,
+                thickness,
+                x,
+                y,
+                z,
+                Profile2dShellSide::Inner,
+            )
+        };
+        let distance = if thickness <= 1.0e-6 || outer.distance > 0.0 {
+            outer.distance
+        } else {
+            outer.distance.max(-inner.distance)
+        };
+        if distance < best.distance {
+            best = ShellBranchSample {
+                outer_distance: outer.distance,
+                inner_distance: inner.distance,
+                distance,
+                segment: index,
+                outer_gradient: outer.gradient,
+                inner_gradient: inner.gradient,
             };
         }
     }
@@ -1898,12 +2043,11 @@ fn sample_profile_nodes(
     let mut monotonic_in_z = nondecreasing || nonincreasing;
 
     if inset > 0.0 {
-        let width_floor = max_half_width.min(0.012);
-        let width_scale = if max_half_width <= 1.0e-6 {
-            0.0
-        } else {
-            (max_half_width - inset * 0.96).max(width_floor) / max_half_width
-        };
+        let width_scale = profile_inner_half_width_scale(
+            max_half_width,
+            inset,
+            profile.min_shell_thickness,
+        );
 
         nondecreasing = true;
         nonincreasing = true;
@@ -2083,13 +2227,11 @@ fn sample_profile_nodes_packet4(
         previous_z = [0.0; 4];
         let mut width_scale = [0.0; 4];
         for lane in 0..4 {
-            let width_floor = max_half_width[lane].min(0.012);
-            width_scale[lane] = if max_half_width[lane] <= 1.0e-6 {
-                0.0
-            } else {
-                (max_half_width[lane] - inset * 0.96).max(width_floor)
-                    / max_half_width[lane]
-            };
+            width_scale[lane] = profile_inner_half_width_scale(
+                max_half_width[lane],
+                inset,
+                profile.min_shell_thickness,
+            );
         }
 
         for (node_index, _) in segment.nodes.iter().enumerate().take(node_count)
@@ -2139,6 +2281,27 @@ fn sample_profile_nodes_packet4(
             monotonic_in_z: monotonic_in_z[3],
         },
     ]
+}
+
+#[inline(always)]
+fn profile_inner_half_width_scale(
+    max_half_width: f32,
+    inset: f32,
+    min_shell_thickness: f32,
+) -> f32 {
+    if max_half_width <= 1.0e-6 {
+        return 0.0;
+    }
+
+    let width_floor = max_half_width.min(0.012);
+    let mut target_half_width =
+        (max_half_width - inset * 0.96).max(width_floor);
+    let min_shell_thickness = min_shell_thickness.max(0.0);
+    if min_shell_thickness > 0.0 {
+        target_half_width = target_half_width
+            .min((max_half_width - min_shell_thickness).max(0.0));
+    }
+    (target_half_width / max_half_width).clamp(0.0, 1.0)
 }
 
 #[inline(always)]
