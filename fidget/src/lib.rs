@@ -208,20 +208,21 @@
 //! ```
 //! use fidget::{
 //!     context::{Tree, Context},
-//!     render::ImageSize,
-//!     raster::ImageRenderConfig,
+//!     raster::pixel::{RenderConfig, RenderSize},
 //!     vm::VmShape,
 //! };
 //!
 //! let x = Tree::x();
 //! let y = Tree::y();
 //! let tree = (x.square() + y.square()).sqrt() - 1.0;
-//! let cfg = ImageRenderConfig {
-//!     image_size: ImageSize::from(32),
+//! let cfg = RenderConfig {
+//!     image_size: RenderSize::from(32),
 //!     ..Default::default()
 //! };
 //! let shape = VmShape::from(tree);
-//! let out = cfg.run(shape).unwrap();
+//! let out = cfg
+//!     .run(shape)
+//!     .expect("render is not cancelled");
 //! let mut iter = out.iter();
 //! for y in 0..cfg.image_size.height() {
 //!     for x in 0..cfg.image_size.width() {
@@ -309,6 +310,9 @@ pub use fidget_raster as raster;
 
 #[cfg(feature = "gui")]
 pub use fidget_gui as gui;
+
+#[cfg(feature = "wgpu")]
+pub use fidget_wgpu as wgpu;
 
 #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
 pub use fidget_jit as jit;

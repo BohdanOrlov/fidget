@@ -12,7 +12,10 @@ use notify::{Event, EventKind, Watcher};
 
 use fidget::{
     gui::{Canvas2, Canvas3, CursorState, DragMode, View2, View3},
-    raster::{GeometryPixel, ImageRenderConfig, VoxelRenderConfig},
+    raster::{
+        pixel::RenderConfig as ImageRenderConfig,
+        voxel::{GeometryPixel, RenderConfig as VoxelRenderConfig},
+    },
 };
 
 use std::{error::Error, path::Path};
@@ -173,26 +176,25 @@ fn render_2d<F: fidget::eval::Function + fidget::render::RenderHints>(
 ) -> Vec<[u8; 4]> {
     let config = ImageRenderConfig {
         image_size,
-        tile_sizes: F::tile_sizes_2d(),
         world_to_model: view.world_to_model(),
         pixel_perfect: matches!(mode, Mode2D::Sdf),
         ..Default::default()
     };
 
+    let tmp = config
+        .run(shape)
+        .expect("rendering should not be cancelled");
     let out = match mode {
         Mode2D::Color => {
-            let tmp = config.run(shape).unwrap();
             let c = [color[0], color[1], color[2], u8::MAX];
             tmp.map(|p| if p.inside() { c } else { [0u8; 4] })
         }
 
         Mode2D::Sdf => {
-            let tmp = config.run(shape).unwrap();
             fidget::raster::effects::to_rgba_distance(tmp, config.threads)
         }
 
         Mode2D::Debug => {
-            let tmp = config.run(shape).unwrap();
             fidget::raster::effects::to_debug_bitmap(tmp, config.threads)
         }
     };
@@ -207,13 +209,14 @@ fn render_3d<F: fidget::eval::Function + fidget::render::RenderHints>(
 ) -> Vec<GeometryPixel> {
     let config = VoxelRenderConfig {
         image_size,
-        tile_sizes: F::tile_sizes_3d(),
         world_to_model: view.world_to_model(),
         ..Default::default()
     };
 
     // Get the geometry buffer from the voxel rendering process
-    let geometry_buffer = config.run(shape).unwrap();
+    let geometry_buffer = config
+        .run(shape)
+        .expect("rendering should not be cancelled");
 
     // For both rendering modes, we'll just pass the GeometryPixel data
     // to the GPU, which will apply the appropriate rendering effect

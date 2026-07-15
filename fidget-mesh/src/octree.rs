@@ -11,8 +11,11 @@ use super::{
 };
 use fidget_core::{
     eval::Function,
-    render::{CancelToken, RenderHandle, RenderHints, ThreadPool},
-    shape::{Shape, ShapeBulkEval, ShapeTracingEval, ShapeVars},
+    render::{RenderHandle, RenderHints, ThreadPool},
+    shape::{
+        BoundShape, IntoBoundShape, Shape, ShapeBulkEval, ShapeBulkEvalError,
+        ShapeTracingEval, ShapeTracingEvalError, ShapeVars,
+    },
     types::Grad,
 };
 use std::collections::VecDeque;
@@ -40,74 +43,48 @@ impl Octree {
         }
     }
 
-    /// Builds an octree to the given depth, with user-provided variables
-    ///
-    /// The shape is evaluated on the region specified by `settings.bounds`.
-    ///
-    /// Returns `None` if processing is cancelled by the [`CancelToken`] in
-    /// [`Settings`].
-    pub fn build_with_vars<F: Function + RenderHints + Clone>(
-        shape: &Shape<F>,
-        vars: &ShapeVars<f32>,
-        settings: &Settings,
-    ) -> Option<Self> {
-        // Transform the shape given our world-to-model matrix
-        let t = settings.world_to_model;
-        if t == nalgebra::Matrix4::identity() {
-            Self::build_inner(shape, vars, settings)
-        } else {
-            let shape = shape.with_transform(t);
-            let mut out = Self::build_inner(&shape, vars, settings)?;
-
-            // Apply the transform from [-1, +1] back to model space
-            for v in &mut out.verts {
-                let p: nalgebra::Point3<f32> = v.pos.into();
-                let q = t.transform_point(&p);
-                v.pos = q.coords;
-            }
-            Some(out)
-        }
-    }
-
     /// Builds an octree to the given depth
     ///
-    /// If the shape uses variables other than `x`, `y`, `z`, then
-    /// [`build_with_vars`](Octree::build_with_vars) should be used instead (and
-    /// this function will return an error).
-    ///
     /// The shape is evaluated on the region specified by `settings.bounds`.
-    pub fn build<F: Function + RenderHints + Clone>(
-        shape: &Shape<F>,
-        settings: &Settings,
-    ) -> Option<Self> {
-        Self::build_with_vars(shape, &ShapeVars::new(), settings)
+    ///
+    /// Returns `None` if processing is cancelled by the
+    /// [`CancelToken`](fidget_core::render::CancelToken) in [`Settings`].
+    pub fn build<'a, S>(shape: S, settings: &Settings) -> Option<Self>
+    where
+        S: IntoBoundShape<'a>,
+        S::Function: RenderHints + Clone,
+    {
+        let b = shape.into_bound_shape().ok()?;
+        let mut out = Self::build_inner(&b, settings)?;
+
+        // Apply the transform from [-1, +1] back to model space
+        if settings.world_to_model != nalgebra::Matrix4::identity() {
+            for v in &mut out.verts {
+                let p: nalgebra::Point3<f32> = v.pos.into();
+                let q = settings.world_to_model.transform_point(&p);
+                v.pos = q.coords;
+            }
+        }
+        Some(out)
     }
 
-    fn build_inner<F: Function + RenderHints + Clone, T: Sync>(
-        shape: &Shape<F, T>,
-        vars: &ShapeVars<f32>,
+    /// Performs the inner work of evaluation
+    ///
+    /// # Panics
+    /// If `shape` and `vars` are not compatible
+    fn build_inner<F: Function + RenderHints + Clone>(
+        b: &BoundShape<F, f32>,
         settings: &Settings,
     ) -> Option<Self> {
+        let shape = b.shape();
+        let vars = b.vars();
         if let Some(threads) = settings.threads {
-            Self::build_inner_mt(
-                shape,
-                vars,
-                settings.depth,
-                &settings.cancel,
-                threads,
-            )
+            Self::build_inner_mt(shape, settings, vars, threads)
         } else {
             let mut eval = RenderHandle::new(shape.clone());
-            let mut out = OctreeBuilder::new();
+            let mut out = OctreeBuilder::new(settings, vars);
             let mut hermite = LeafHermiteData::default();
-            if out.recurse(
-                &mut eval,
-                vars,
-                CellIndex::default(),
-                settings.depth,
-                &settings.cancel,
-                &mut hermite,
-            ) {
+            if out.recurse(&mut eval, CellIndex::default(), &mut hermite) {
                 Some(out.octree)
             } else {
                 None
@@ -116,11 +93,10 @@ impl Octree {
     }
 
     /// Multithreaded constructor
-    fn build_inner_mt<F: Function + RenderHints + Clone, T: Sync>(
-        shape: &Shape<F, T>,
+    fn build_inner_mt<F: Function + RenderHints + Clone>(
+        shape: &Shape<F>,
+        settings: &Settings,
         vars: &ShapeVars<f32>,
-        max_depth: u8,
-        cancel: &CancelToken,
         threads: &ThreadPool,
     ) -> Option<Self> {
         let mut root = Octree::new();
@@ -132,8 +108,8 @@ impl Octree {
         // We want a number of tasks that's significantly larger than our thread
         // count, so that we can fully saturate all cores even if tasks take
         // different amounts of time.
-        let target_count =
-            (8usize.pow(u32::from(max_depth))).min(threads.thread_count() * 10);
+        let target_count = (8usize.pow(u32::from(settings.depth)))
+            .min(threads.thread_count() * 10);
         while todo.len() < target_count {
             let next = todo.pop_front().unwrap();
 
@@ -160,7 +136,7 @@ impl Octree {
         let out = threads.run(|| {
             todo.par_iter()
                 .map_init(
-                    || (OctreeBuilder::new(), rh.clone()),
+                    || (OctreeBuilder::new(settings, vars), rh.clone()),
                     |(builder, eval), cell| {
                         let mut hermite = LeafHermiteData::default();
                         // Patch our cell so that it builds at index 0
@@ -168,14 +144,7 @@ impl Octree {
                             index: None,
                             ..*cell
                         };
-                        if !builder.recurse(
-                            eval,
-                            vars,
-                            local_cell,
-                            max_depth,
-                            cancel,
-                            &mut hermite,
-                        ) {
+                        if !builder.recurse(eval, local_cell, &mut hermite) {
                             return None;
                         }
                         let octree = std::mem::replace(
@@ -494,10 +463,15 @@ impl std::ops::IndexMut<CellIndex<3>> for Octree {
 }
 
 /// Data structure for an under-construction octree
-#[derive(Debug)]
-pub(crate) struct OctreeBuilder<F: Function + RenderHints> {
+pub(crate) struct OctreeBuilder<'a, F: Function + RenderHints> {
     /// In-construction octree
     pub(crate) octree: Octree,
+
+    // Values stolen from settings
+    cancel: fidget_core::render::CancelToken,
+    world_to_model: Option<&'a nalgebra::Matrix4<f32>>,
+    max_depth: u8,
+    vars: &'a ShapeVars<f32>,
 
     eval_float_slice: ShapeBulkEval<F::FloatSliceEval>,
     eval_interval: ShapeTracingEval<F::IntervalEval>,
@@ -508,17 +482,26 @@ pub(crate) struct OctreeBuilder<F: Function + RenderHints> {
     workspace: F::Workspace,
 }
 
-impl<F: Function + RenderHints> Default for OctreeBuilder<F> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<F: Function + RenderHints> OctreeBuilder<F> {
+impl<'a, F: Function + RenderHints> OctreeBuilder<'a, F> {
     /// Builds a new octree builder, which allocates data for 8 root cells
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(
+        settings: &'a Settings,
+        vars: &'a ShapeVars<f32>,
+    ) -> Self {
+        let world_to_model =
+            if settings.world_to_model == nalgebra::Matrix4::identity() {
+                None
+            } else {
+                Some(&settings.world_to_model)
+            };
         Self {
             octree: Octree::new(),
+
+            cancel: settings.cancel.clone(),
+            max_depth: settings.depth,
+            world_to_model,
+            vars,
+
             eval_float_slice: Shape::<F>::new_float_slice_eval(),
             eval_grad_slice: Shape::<F>::new_grad_slice_eval(),
             eval_interval: Shape::<F>::new_interval_eval(),
@@ -537,28 +520,26 @@ impl<F: Function + RenderHints> OctreeBuilder<F> {
     /// Returns `true` if recursion completed normally, or `false` if it was
     /// cancelled.
     #[must_use]
-    fn recurse<T>(
+    fn recurse(
         &mut self,
-        eval: &mut RenderHandle<F, T>,
-        vars: &ShapeVars<f32>,
+        eval: &mut RenderHandle<F>,
         cell: CellIndex<3>,
-        max_depth: u8,
-        cancel: &CancelToken,
         hermite: &mut LeafHermiteData,
     ) -> bool {
-        if cancel.is_cancelled() {
+        if self.cancel.is_cancelled() {
             return false;
         }
-        let (i, r) = self
-            .eval_interval
-            .eval_v(
-                eval.i_tape(&mut self.tape_storage),
-                cell.bounds[crate::types::X],
-                cell.bounds[crate::types::Y],
-                cell.bounds[crate::types::Z],
-                vars,
-            )
-            .unwrap();
+        let (i, r) = match self.eval_interval.eval_raw(
+            eval.i_tape(&mut self.tape_storage),
+            cell.bounds[crate::types::X],
+            cell.bounds[crate::types::Y],
+            cell.bounds[crate::types::Z],
+            self.world_to_model,
+            self.vars,
+        ) {
+            Ok(v) => v,
+            Err(ShapeTracingEvalError::MissingVar(..)) => unreachable!(),
+        };
         self.octree[cell] = if i.upper() < 0.0 {
             Cell::Full
         } else if i.lower() > 0.0 {
@@ -578,8 +559,8 @@ impl<F: Function + RenderHints> OctreeBuilder<F> {
             } else {
                 eval
             };
-            if cell.depth == max_depth as usize {
-                self.leaf(sub_tape, vars, cell, hermite)
+            if cell.depth == self.max_depth as usize {
+                self.leaf(sub_tape, cell, hermite)
             } else {
                 // Reserve new cells for the 8x children
                 let index = self.octree.cells.len();
@@ -589,10 +570,7 @@ impl<F: Function + RenderHints> OctreeBuilder<F> {
                     let cell = cell.child(index, i);
                     if !self.recurse(
                         sub_tape,
-                        vars,
                         cell,
-                        max_depth,
-                        cancel,
                         &mut hermite_child[i.index()],
                     ) {
                         return false;
@@ -611,10 +589,9 @@ impl<F: Function + RenderHints> OctreeBuilder<F> {
     /// Writes the leaf vertex to `self.o.verts`, hermite data to
     /// `self.hermite`, and the leaf data to `self.leafs`.  Does **not** write
     /// anything to `self.o.cells`; the cell is returned instead.
-    fn leaf<T>(
+    fn leaf(
         &mut self,
-        eval: &mut RenderHandle<F, T>,
-        vars: &ShapeVars<f32>,
+        eval: &mut RenderHandle<F>,
         cell: CellIndex<3>,
         hermite_cell: &mut LeafHermiteData,
     ) -> Cell<3> {
@@ -628,10 +605,20 @@ impl<F: Function + RenderHints> OctreeBuilder<F> {
             zs[i.index()] = z;
         }
 
-        let out = self
-            .eval_float_slice
-            .eval_v(eval.f_tape(&mut self.tape_storage), &xs, &ys, &zs, vars)
-            .unwrap();
+        let out = match self.eval_float_slice.eval_raw(
+            eval.f_tape(&mut self.tape_storage),
+            &xs,
+            &ys,
+            &zs,
+            self.world_to_model,
+            ShapeBulkEval::<F::FloatSliceEval>::var_value(self.vars),
+        ) {
+            Ok(v) => v,
+            Err(
+                ShapeBulkEvalError::MissingVar(..)
+                | ShapeBulkEvalError::MismatchedVarSlices { .. },
+            ) => unreachable!(),
+        };
         debug_assert_eq!(out.len(), 8);
 
         // Build a mask of active corners, which determines cell
@@ -731,10 +718,20 @@ impl<F: Function + RenderHints> OctreeBuilder<F> {
             debug_assert_eq!(i, EDGE_SEARCH_SIZE * edge_count);
 
             // Do the actual evaluation
-            let out = self
-                .eval_float_slice
-                .eval_v(eval.f_tape(&mut self.tape_storage), xs, ys, zs, vars)
-                .unwrap();
+            let out = match self.eval_float_slice.eval_raw(
+                eval.f_tape(&mut self.tape_storage),
+                xs,
+                ys,
+                zs,
+                self.world_to_model,
+                ShapeBulkEval::<F::FloatSliceEval>::var_value(self.vars),
+            ) {
+                Ok(v) => v,
+                Err(
+                    ShapeBulkEvalError::MissingVar(..)
+                    | ShapeBulkEvalError::MismatchedVarSlices { .. },
+                ) => unreachable!(),
+            };
 
             // Update start and end positions based on evaluation
             for ((start, end), search) in start
@@ -797,10 +794,20 @@ impl<F: Function + RenderHints> OctreeBuilder<F> {
         }
 
         // TODO: special case for cells with multiple gradients ("features")
-        let grads = self
-            .eval_grad_slice
-            .eval_v(eval.g_tape(&mut self.tape_storage), xs, ys, zs, vars)
-            .unwrap();
+        let grads = match self.eval_grad_slice.eval_raw(
+            eval.g_tape(&mut self.tape_storage),
+            xs,
+            ys,
+            zs,
+            self.world_to_model,
+            ShapeBulkEval::<F::GradSliceEval>::var_value(self.vars),
+        ) {
+            Ok(v) => v,
+            Err(
+                ShapeBulkEvalError::MissingVar(..)
+                | ShapeBulkEvalError::MismatchedVarSlices { .. },
+            ) => unreachable!(),
+        };
 
         let mut verts: arrayvec::ArrayVec<_, 4> = arrayvec::ArrayVec::new();
         let mut i = 0;
@@ -1039,7 +1046,7 @@ mod test {
         render::ThreadPool,
         shape::EzShape,
         var::Var,
-        vm::VmShape,
+        vm::{VmFunction, VmShape},
     };
     use std::collections::BTreeMap;
 
@@ -1057,6 +1064,14 @@ mod test {
             threads: None,
             ..Default::default()
         }
+    }
+
+    /// Converts a [`Tree`] with no extra variables to a [`BoundShape`]
+    ///
+    /// # Panics
+    /// If the tree uses variables
+    fn tree_to_shape(t: Tree) -> BoundShape<'static, VmFunction, f32> {
+        VmShape::from(t).try_into().expect("no variables allowed")
     }
 
     fn sphere(center: [f32; 3], radius: f32) -> Tree {
@@ -1080,7 +1095,7 @@ mod test {
     fn test_cube_edge() {
         const EPSILON: f32 = 1e-3;
         let f = 2.0;
-        let shape = VmShape::from(cube([-f, f], [-f, 0.3], [-f, 0.6]));
+        let shape = tree_to_shape(cube([-f, f], [-f, 0.3], [-f, 0.6]));
         // This should be a cube with a single edge running through the root
         // node of the octree, with an edge vertex at [0, 0.3, 0.6]
         let octree = Octree::build(&shape, &depth0_single_thread()).unwrap();
@@ -1129,7 +1144,7 @@ mod test {
 
     #[test]
     fn test_mesh_basic() {
-        let shape = VmShape::from(sphere([0.0; 3], 0.2));
+        let shape = tree_to_shape(sphere([0.0; 3], 0.2));
 
         // If we only build a depth-0 octree, then it's a leaf without any
         // vertices (since all the corners are empty)
@@ -1166,7 +1181,7 @@ mod test {
 
     #[test]
     fn test_sphere_verts() {
-        let shape = VmShape::from(sphere([0.0; 3], 0.2));
+        let shape = tree_to_shape(sphere([0.0; 3], 0.2));
 
         let octree = Octree::build(&shape, &depth1_single_thread()).unwrap();
         let sphere_mesh = octree.walk_dual();
@@ -1202,7 +1217,7 @@ mod test {
 
     #[test]
     fn test_sphere_manifold() {
-        let shape = VmShape::from(sphere([0.0; 3], 0.85));
+        let shape = tree_to_shape(sphere([0.0; 3], 0.85));
 
         for threads in [None, Some(&ThreadPool::Global)] {
             let settings = Settings {
@@ -1220,7 +1235,7 @@ mod test {
 
     #[test]
     fn test_cube_verts() {
-        let shape = VmShape::from(cube([-0.1, 0.6], [-0.2, 0.75], [-0.3, 0.4]));
+        let shape = tree_to_shape(cube([-0.1, 0.6], [-0.2, 0.75], [-0.3, 0.4]));
 
         let octree = Octree::build(&shape, &depth1_single_thread()).unwrap();
         let mesh = octree.walk_dual();
@@ -1270,7 +1285,7 @@ mod test {
                 for offset in [0.0, -0.2, 0.2] {
                     let (x, y, z) = Tree::axes();
                     let f = x * dx + y * dy + z + offset;
-                    let shape = VmShape::from(f);
+                    let shape = tree_to_shape(f);
                     let octree =
                         Octree::build(&shape, &depth0_single_thread()).unwrap();
 
@@ -1287,7 +1302,7 @@ mod test {
                          offset: {offset} => {pos:?} != {mass_point:?}"
                     );
                     let mut eval = VmShape::new_point_eval();
-                    let tape = shape.ez_point_tape();
+                    let tape = shape.shape().ez_point_tape();
                     for v in &octree.verts {
                         let v = v.pos;
                         let (r, _) = eval.eval(&tape, v.x, v.y, v.z).unwrap();
@@ -1306,10 +1321,10 @@ mod test {
             nalgebra::Vector3::new(1.2, 1.3, 1.4),
         ] {
             let corner = nalgebra::Vector3::new(-1.0, -1.0, -1.0);
-            let shape = VmShape::from(cone(corner, tip, 0.1));
+            let shape = tree_to_shape(cone(corner, tip, 0.1));
 
             let mut eval = VmShape::new_point_eval();
-            let tape = shape.ez_point_tape();
+            let tape = shape.shape().ez_point_tape();
             let (v, _) = eval.eval(&tape, tip.x, tip.y, tip.z).unwrap();
             assert!(v.abs() < 1e-6, "bad tip value: {v}");
             let (v, _) =
@@ -1348,7 +1363,7 @@ mod test {
 
         // Now, we have our shape, which is 0-8 spheres placed at the
         // corners of the cell spanning [0, 0.25]
-        let shape = VmShape::from(shape);
+        let shape = tree_to_shape(shape);
         let settings = Settings {
             depth: 2,
             threads,
@@ -1386,13 +1401,13 @@ mod test {
 
     #[test]
     fn test_collapsible() {
-        let shape = VmShape::from(sphere([0.0; 3], 0.1));
+        let shape = tree_to_shape(sphere([0.0; 3], 0.1));
         let octree = Octree::build(&shape, &depth1_single_thread()).unwrap();
         assert!(octree.collapsible(0).is_none());
 
         // If we have a single corner sphere, then the builder will collapse the
         // branch for us, leaving just a leaf.
-        let shape = VmShape::from(sphere([-1.0; 3], 0.1));
+        let shape = tree_to_shape(sphere([-1.0; 3], 0.1));
         let octree = Octree::build(&shape, &depth1_single_thread()).unwrap();
         assert!(matches!(octree.root, Cell::Leaf { .. }));
 
@@ -1428,13 +1443,13 @@ mod test {
             octree.root
         );
 
-        let shape = VmShape::from(sphere([-1.0, 0.0, 1.0], 0.1));
+        let shape = tree_to_shape(sphere([-1.0, 0.0, 1.0], 0.1));
         let octree = Octree::build(&shape, &depth1_single_thread()).unwrap();
         assert!(octree.collapsible(0).is_none());
 
         let a = sphere([-1.0; 3], 0.1);
         let b = sphere([1.0; 3], 0.1);
-        let shape = VmShape::from(a.min(b));
+        let shape = tree_to_shape(a.min(b));
         let octree = Octree::build(&shape, &depth1_single_thread()).unwrap();
         assert!(octree.collapsible(0).is_none());
     }
@@ -1442,7 +1457,7 @@ mod test {
     #[test]
     fn test_empty_collapse() {
         // Make a very smol sphere that won't be sampled
-        let shape = VmShape::from(sphere([0.1; 3], 0.05));
+        let shape = tree_to_shape(sphere([0.1; 3], 0.05));
 
         for threads in [None, Some(&ThreadPool::Global)] {
             let settings = Settings {
@@ -1464,7 +1479,7 @@ mod test {
     fn test_colonnade_manifold() {
         const COLONNADE: &str = include_str!("../../models/colonnade.vm");
         let (ctx, root) = Context::from_text(COLONNADE.as_bytes()).unwrap();
-        let tape = VmShape::new(&ctx, root).unwrap();
+        let shape = VmShape::new(&ctx, root).unwrap();
 
         for threads in [None, Some(&ThreadPool::Global)] {
             let settings = Settings {
@@ -1472,7 +1487,7 @@ mod test {
                 threads,
                 ..Default::default()
             };
-            let octree = Octree::build(&tape, &settings).unwrap();
+            let octree = Octree::build(&shape, &settings).unwrap();
             let mesh = octree.walk_dual();
             // Note: the model has duplicate vertices!
             if let Err(e) = check_for_edge_matching(&mesh) {
@@ -1488,7 +1503,7 @@ mod test {
     fn colonnade_bounds() {
         const COLONNADE: &str = include_str!("../../models/colonnade.vm");
         let (ctx, root) = Context::from_text(COLONNADE.as_bytes()).unwrap();
-        let tape = VmShape::new(&ctx, root).unwrap();
+        let shape = VmShape::new(&ctx, root).unwrap();
 
         for threads in [None, Some(&ThreadPool::Global)] {
             let settings = Settings {
@@ -1496,7 +1511,7 @@ mod test {
                 threads,
                 ..Default::default()
             };
-            let octree = Octree::build(&tape, &settings).unwrap();
+            let octree = Octree::build(&shape, &settings).unwrap();
             let mesh = octree.walk_dual();
             for v in mesh.vertices.iter() {
                 assert!(
@@ -1517,7 +1532,7 @@ mod test {
     fn bear_bounds() {
         const COLONNADE: &str = include_str!("../../models/bear.vm");
         let (ctx, root) = Context::from_text(COLONNADE.as_bytes()).unwrap();
-        let tape = VmShape::new(&ctx, root).unwrap();
+        let shape = VmShape::new(&ctx, root).unwrap();
 
         for threads in [None, Some(&ThreadPool::Global)] {
             let settings = Settings {
@@ -1525,7 +1540,7 @@ mod test {
                 threads,
                 ..Default::default()
             };
-            let octree = Octree::build(&tape, &settings).unwrap();
+            let octree = Octree::build(&shape, &settings).unwrap();
             let mesh = octree.walk_dual();
             for v in mesh.vertices.iter() {
                 assert!(
@@ -1621,7 +1636,7 @@ mod test {
 
     #[test]
     fn test_qef_near_planar() {
-        let shape = VmShape::from(sphere([0.0; 3], 0.75));
+        let shape = tree_to_shape(sphere([0.0; 3], 0.75));
 
         let settings = Settings {
             depth: 4,
@@ -1653,9 +1668,9 @@ mod test {
             for r in [0.5, 0.75] {
                 let mut vars = ShapeVars::new();
                 vars.insert(v.index().unwrap(), r);
-                let octree = Octree::build_with_vars(&shape, &vars, &settings)
-                    .unwrap()
-                    .walk_dual();
+                let shape = shape.bind(&vars).unwrap();
+                let octree =
+                    Octree::build(&shape, &settings).unwrap().walk_dual();
                 for v in octree.vertices.iter() {
                     let n = v.norm();
                     assert!(
@@ -1672,7 +1687,7 @@ mod test {
     fn test_octree_cancel() {
         let (x, y, z) = Tree::axes();
         let sphere = (x.square() + y.square() + z.square()).sqrt() - 1.0;
-        let shape = VmShape::from(sphere);
+        let shape = tree_to_shape(sphere);
 
         for threads in [None, Some(&ThreadPool::Global)] {
             let settings = Settings {

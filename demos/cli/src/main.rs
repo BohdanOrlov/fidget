@@ -50,6 +50,10 @@ enum Command {
         #[clap(long, value_enum, default_value_t = RenderMode3DArg::Heightmap)]
         mode: RenderMode3DArg,
 
+        /// Render on the GPU
+        #[clap(long)]
+        wgpu: bool,
+
         /// Rotation about the Y axis (in degrees)
         #[clap(long, default_value_t = 0.0, allow_hyphen_values = true)]
         pitch: f32,
@@ -113,8 +117,6 @@ enum EvalMode {
 enum RenderMode3D {
     /// Pixels are colored based on height
     Heightmap,
-    /// Leaf-level debug visualization of sampled signed distance
-    LeafDebugDistance,
     /// Pixels are colored based on normals
     Normals { denoise: bool },
     /// Pixels are shaded
@@ -268,86 +270,79 @@ fn run3d<F: fidget::eval::Function + fidget::render::RenderHints>(
     shape: fidget::shape::Shape<F>,
     world_to_model: nalgebra::Matrix4<f32>,
     settings: &ImageSettings,
-    mode: RenderMode3D,
-) -> Vec<u8> {
-    let threads = match settings.threads {
-        Some(n) if n.get() == 1 => None,
-        Some(n) => Some(fidget::render::ThreadPool::Custom(
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(n.get())
-                .build()
-                .unwrap(),
-        )),
-        None => Some(fidget::render::ThreadPool::Global),
-    };
-    let threads = threads.as_ref();
-    let cfg = fidget::raster::VoxelRenderConfig {
+    threads: Option<&fidget::render::ThreadPool>,
+) -> fidget::raster::voxel::Image {
+    let cfg = fidget::raster::voxel::RenderConfig {
         image_size: fidget::render::VoxelSize::from(settings.size),
-        tile_sizes: F::tile_sizes_3d(),
         threads,
         world_to_model,
         ..Default::default()
     };
 
-    let mut geometry_image = fidget::raster::GeometryBuffer::default();
-    let mut leaf_debug_image = fidget::raster::LeafDebugBuffer::default();
+    let mut image = Default::default();
+    let bound_shape =
+        fidget::shape::BoundShape::try_from(shape).expect("no vars allowed");
 
     let start = std::time::Instant::now();
     for _ in 0..settings.n {
-        match &mode {
-            RenderMode3D::LeafDebugDistance => {
-                leaf_debug_image = cfg.run_leaf_debug(shape.clone()).unwrap();
-            }
-            _ => {
-                geometry_image = cfg.run(shape.clone()).unwrap();
-            }
-        }
+        // Unwrap both cancellation and errors
+        image = cfg
+            .run(bound_shape.clone())
+            .expect("rendering should not be cancelled");
     }
     info!(
         "Rendered {}× at {:?} ms/frame",
         settings.n,
         start.elapsed().as_micros() as f64 / 1000.0 / (settings.n as f64)
     );
+    image
+}
 
+fn run3d_wgpu(
+    shape: fidget::vm::VmShape,
+    world_to_model: nalgebra::Matrix4<f32>,
+    settings: &ImageSettings,
+) -> Result<fidget::raster::voxel::Image> {
+    // Build a WGPU context
+    let (device, queue) =
+        pollster::block_on(async move { fidget::wgpu::init().await })?;
+
+    let ctx = fidget::wgpu::voxel::Context::new(device, queue);
+    let image_size = fidget::render::VoxelSize::from(settings.size);
+    let cfg = fidget::wgpu::voxel::RenderConfig { world_to_model };
+    let mut image = Default::default();
+    let start = std::time::Instant::now();
+    let buffers = ctx.buffers(image_size)?;
+    let mut out = ctx.image_buffer(&buffers);
+    let shape = ctx.shape(&shape)?;
+    let mut compute_pass_time = std::time::Duration::ZERO;
+    for _ in 0..settings.n {
+        ctx.submit(&shape, &buffers, Some(&mut out), &cfg)?;
+        let img = ctx.map_image(&mut out);
+        compute_pass_time += img.time().unwrap();
+        image = img.image();
+    }
+    info!(
+        "Rendered {}× at {:.2?} ms/frame ({:.2?} ms/compute pass)",
+        settings.n,
+        start.elapsed().as_micros() as f64 / 1000.0 / (settings.n as f64),
+        compute_pass_time.as_micros() as f64 / 1000.0 / (settings.n as f64)
+    );
+    Ok(image)
+}
+
+fn postprocess3d(
+    image: fidget::raster::voxel::Image,
+    mode: RenderMode3D,
+    threads: Option<&fidget::render::ThreadPool>,
+) -> Vec<u8> {
     let start = std::time::Instant::now();
     let out = match mode {
-        RenderMode3D::LeafDebugDistance => {
-            let max_abs_distance = leaf_debug_image
-                .iter()
-                .filter(|p| p.depth > 0.0)
-                .map(|p| ordered_float::OrderedFloat(p.distance.abs()))
-                .max()
-                .map(|p| p.0)
-                .unwrap_or(1.0)
-                .max(1e-6);
-
-            leaf_debug_image
-                .into_iter()
-                .flat_map(|p| {
-                    if p.depth > 0.0 {
-                        let normalized =
-                            (p.distance / max_abs_distance).clamp(-1.0, 1.0);
-                        if normalized >= 0.0 {
-                            let r = (normalized * 255.0).round() as u8;
-                            [r, 32, 0, 255]
-                        } else {
-                            let b = ((-normalized) * 255.0).round() as u8;
-                            [0, 32, b, 255]
-                        }
-                    } else {
-                        [0, 0, 0, 0]
-                    }
-                })
-                .collect()
-        }
         RenderMode3D::Normals { denoise } => {
             let image = if denoise {
-                fidget::raster::effects::denoise_normals(
-                    &geometry_image,
-                    threads,
-                )
+                fidget::raster::effects::denoise_normals(&image, threads)
             } else {
-                geometry_image
+                image
             };
             image
                 .into_iter()
@@ -363,12 +358,9 @@ fn run3d<F: fidget::eval::Function + fidget::render::RenderHints>(
         }
         RenderMode3D::Shaded { ssao, denoise } => {
             let image = if denoise {
-                fidget::raster::effects::denoise_normals(
-                    &geometry_image,
-                    threads,
-                )
+                fidget::raster::effects::denoise_normals(&image, threads)
             } else {
-                geometry_image
+                image
             };
             let color =
                 fidget::raster::effects::apply_shading(&image, ssao, threads);
@@ -386,12 +378,9 @@ fn run3d<F: fidget::eval::Function + fidget::render::RenderHints>(
         }
         RenderMode3D::RawOcclusion { denoise } => {
             let image = if denoise {
-                fidget::raster::effects::denoise_normals(
-                    &geometry_image,
-                    threads,
-                )
+                fidget::raster::effects::denoise_normals(&image, threads)
             } else {
-                geometry_image
+                image
             };
             let ssao = fidget::raster::effects::compute_ssao(&image, threads);
             ssao.into_iter()
@@ -407,12 +396,9 @@ fn run3d<F: fidget::eval::Function + fidget::render::RenderHints>(
         }
         RenderMode3D::BlurredOcclusion { denoise } => {
             let image = if denoise {
-                fidget::raster::effects::denoise_normals(
-                    &geometry_image,
-                    threads,
-                )
+                fidget::raster::effects::denoise_normals(&image, threads)
             } else {
-                geometry_image
+                image
             };
             let ssao = fidget::raster::effects::compute_ssao(&image, threads);
             let blurred = fidget::raster::effects::blur_ssao(&ssao, threads);
@@ -429,13 +415,13 @@ fn run3d<F: fidget::eval::Function + fidget::render::RenderHints>(
                 .collect()
         }
         RenderMode3D::Heightmap => {
-            let z_max = geometry_image
+            let z_max = image
                 .iter()
                 .map(|p| ordered_float::OrderedFloat(p.depth))
                 .max()
                 .map(|p| p.0)
                 .unwrap_or(1.0);
-            geometry_image
+            image
                 .into_iter()
                 .flat_map(|p| {
                     if p.depth > 0.0 {
@@ -487,6 +473,8 @@ fn run2d<F: fidget::eval::Function + fidget::render::RenderHints>(
             .flat_map(|i| i.into_iter())
             .collect()
     } else {
+        let bound_shape = fidget::shape::BoundShape::try_from(shape)
+            .expect("no vars allowed");
         let threads = match settings.threads {
             Some(n) if n.get() == 1 => None,
             Some(n) => Some(fidget::render::ThreadPool::Custom(
@@ -497,45 +485,40 @@ fn run2d<F: fidget::eval::Function + fidget::render::RenderHints>(
             )),
             None => Some(fidget::render::ThreadPool::Global),
         };
-        let cfg = fidget::raster::ImageRenderConfig {
+        let cfg = fidget::raster::pixel::RenderConfig {
             image_size: fidget::render::ImageSize::from(settings.size),
-            tile_sizes: F::tile_sizes_2d(),
             threads: threads.as_ref(),
             pixel_perfect: matches!(mode, RenderMode2D::Sdf),
             world_to_model,
             ..Default::default()
         };
         let mut image = fidget::raster::Image::default();
-        match mode {
-            RenderMode2D::Mono => {
-                for _ in 0..settings.n {
-                    let tmp = cfg.run::<_>(shape.clone()).unwrap();
+        for _ in 0..settings.n {
+            let tmp = cfg
+                .run::<_>(bound_shape.clone())
+                .expect("render should not be cancelled");
+            match mode {
+                RenderMode2D::Mono => {
                     image = fidget::raster::effects::to_rgba_bitmap(
                         tmp,
                         false,
                         cfg.threads,
                     );
                 }
-            }
-            RenderMode2D::Sdf => {
-                for _ in 0..settings.n {
-                    let tmp = cfg.run(shape.clone()).unwrap();
+                RenderMode2D::Sdf => {
                     image = fidget::raster::effects::to_rgba_distance(
                         tmp,
                         cfg.threads,
                     );
                 }
-            }
-            RenderMode2D::Debug => {
-                for _ in 0..settings.n {
-                    let tmp = cfg.run::<_>(shape.clone()).unwrap();
+                RenderMode2D::Debug => {
                     image = fidget::raster::effects::to_debug_bitmap(
                         tmp,
                         cfg.threads,
                     );
                 }
+                RenderMode2D::Brute => unreachable!(),
             }
-            RenderMode2D::Brute => unreachable!(),
         }
         image.into_iter().flatten().collect()
     }
@@ -708,6 +691,7 @@ fn main() -> Result<()> {
             isometric,
             pitch,
             zflatten,
+            wgpu,
             yaw,
             roll,
             center,
@@ -726,19 +710,12 @@ fn main() -> Result<()> {
                 );
                 error.exit();
             }
-            if no_denoise
-                && matches!(
-                    mode,
-                    RenderMode3DArg::Heightmap
-                        | RenderMode3DArg::LeafDebugDistance
-                )
-            {
+            if no_denoise && matches!(mode, RenderMode3DArg::Heightmap) {
                 let mut cmd = Args::command();
                 let sub = cmd.find_subcommand_mut("render3d").unwrap();
                 let error = sub.error(
                     clap::error::ErrorKind::ArgumentConflict,
-                    "`--no-denoise` is not allowed when \
-                     `--mode=heightmap` or `--mode=leaf-debug-distance`",
+                    "`--no-denoise` is not allowed when `--mode=heightmap`",
                 );
                 error.exit();
             }
@@ -748,9 +725,6 @@ fn main() -> Result<()> {
                     RenderMode3D::Shaded { ssao, denoise }
                 }
                 RenderMode3DArg::Heightmap => RenderMode3D::Heightmap,
-                RenderMode3DArg::LeafDebugDistance => {
-                    RenderMode3D::LeafDebugDistance
-                }
                 RenderMode3DArg::BlurredOcclusion => {
                     RenderMode3D::BlurredOcclusion { denoise }
                 }
@@ -790,19 +764,40 @@ fn main() -> Result<()> {
                 * camera.to_homogeneous()
                 * zflatten.to_homogeneous();
 
-            let buffer = match settings.eval {
+            let threads = match settings.threads {
+                Some(n) if n.get() == 1 => None,
+                Some(n) => Some(fidget::render::ThreadPool::Custom(
+                    rayon::ThreadPoolBuilder::new()
+                        .num_threads(n.get())
+                        .build()
+                        .unwrap(),
+                )),
+                None => Some(fidget::render::ThreadPool::Global),
+            };
+
+            let image = if wgpu {
                 #[cfg(feature = "jit")]
-                EvalMode::Jit => {
-                    let shape = fidget::jit::JitShape::new(&ctx, root)?;
-                    info!("Built shape in {:?}", start.elapsed());
-                    run3d(shape, t, &settings, mode)
+                if matches!(settings.eval, EvalMode::Jit) {
+                    bail!("can't combine --wgpu and --jit");
                 }
-                EvalMode::Vm => {
-                    let shape = fidget::vm::VmShape::new(&ctx, root)?;
-                    info!("Built shape in {:?}", start.elapsed());
-                    run3d(shape, t, &settings, mode)
+                let shape = fidget::vm::VmShape::new(&ctx, root)?;
+                run3d_wgpu(shape, t, &settings)?
+            } else {
+                match settings.eval {
+                    #[cfg(feature = "jit")]
+                    EvalMode::Jit => {
+                        let shape = fidget::jit::JitShape::new(&ctx, root)?;
+                        info!("Built shape in {:?}", start.elapsed());
+                        run3d(shape, t, &settings, threads.as_ref())
+                    }
+                    EvalMode::Vm => {
+                        let shape = fidget::vm::VmShape::new(&ctx, root)?;
+                        info!("Built shape in {:?}", start.elapsed());
+                        run3d(shape, t, &settings, threads.as_ref())
+                    }
                 }
             };
+            let buffer = postprocess3d(image, mode, threads.as_ref());
 
             if let Some(out) = settings.out {
                 info!("Writing image to {out:?}");

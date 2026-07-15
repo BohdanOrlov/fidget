@@ -1099,6 +1099,11 @@ impl Function for JitFunction {
     fn can_simplify(&self) -> bool {
         self.0.choice_count() > 0
     }
+
+    #[inline]
+    fn output_count(&self) -> usize {
+        self.0.output_count()
+    }
 }
 
 impl RenderHints for JitFunction {
@@ -1763,6 +1768,8 @@ mod test {
 
     #[test]
     fn jit_shell_float4_records_helper_breakdown() {
+        let _stats_guard = JIT_SHELL_STATS_TEST_LOCK.lock().unwrap();
+
         let shell = profile_packet_shell();
         let xs = [1.10, 1.25, 1.50, 1.85];
         let ys = [0.18, -0.32, 0.44, -0.58];

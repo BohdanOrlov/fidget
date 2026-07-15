@@ -2,7 +2,7 @@
 use crate::compiler::{RegOp, RegisterAllocator, SsaTape};
 use crate::shell::ShellTopology;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 /// Low-level tape for use with the Fidget virtual machine (or to be lowered
 /// further into machine instructions).
@@ -15,6 +15,9 @@ pub struct RegTape {
     pub(crate) shells: Vec<Arc<ShellTopology>>,
 
     /// Total allocated slots
+    ///
+    /// This is a continuous space of registers (`0..N`) and memory (`N..`),
+    /// where `N` is the parameter in [`RegTape::new`].
     pub(super) slot_count: u32,
 }
 
@@ -33,6 +36,35 @@ impl RegTape {
         let mut tape = alloc.finalize();
         tape.shells = ssa.shells.clone();
         tape
+    }
+
+    /// Repacks registers by frequency (so that register 0 is the most frequent)
+    pub fn repack(&mut self) {
+        let map = self.repack_map();
+        for op in &mut self.tape {
+            op.visit_regs_mut(|reg| *reg = map[reg]);
+        }
+    }
+
+    /// Returns a map for register repacking
+    ///
+    /// The map repacks registers in the tape by frequency, so that register 0
+    /// is the most frequent.
+    pub fn repack_map(&self) -> HashMap<u8, u8> {
+        let mut reg_counts: HashMap<u8, usize> = HashMap::new();
+        for op in &self.tape {
+            op.visit_regs(|reg| *reg_counts.entry(reg).or_default() += 1);
+        }
+        let mut sorted = reg_counts
+            .into_iter()
+            .map(|(reg, count)| (std::cmp::Reverse(count), reg))
+            .collect::<Vec<_>>();
+        sorted.sort_unstable();
+        sorted
+            .into_iter()
+            .enumerate()
+            .map(|(i, (_count, reg))| (reg, u8::try_from(i).unwrap()))
+            .collect()
     }
 
     /// Builds a new empty tape

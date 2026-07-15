@@ -1,4 +1,20 @@
 # 0.4.4 (unpublished)
+- Big reorganization of `fidget::raster`
+    - `render2d` and `render3d` modules are renamed to `pixel` and `voxel`,
+      respectively
+    - `ImageRenderConfig` and `VoxelRenderConfig` are both renamed to
+      `RenderConfig` (in different namespaces)
+    - Similarly, each namespace contains an `Image` and `RenderSize` type
+      definition.  `voxel::Image` replaces `GeometryBuffer`; `pixel::Image` is
+      equivalent to `fidget::raster::Image<DistancePixel>` in the previous code
+      (but see the next point about renaming!)
+    - Renamed `DistancePixel` to `RawDistancePixel`; added an unpacked `enum
+      DistancePixel` (instead of using `Result<f32, PixelFill>` as a weird
+      `Either` type
+    - The tile sizes member of `RenderConfig` is now optional and will fall back
+      to the evaluator's tile size if not populated
+        - This adds a `F: RenderHints` trait bound for many functions in
+          `fidget::raster`
 - Add `Image::build` function to build an image from a `Vec<T>` and
   `ImageSizeLike`, returning an error if the data size is incorrect.
 - Revamping `fidget-bytecode`
@@ -7,6 +23,7 @@
       now all generate `BytecodeOp::Sub` (using the reserved register as needed
       for immediates).
     - This also removes the `enum RegOpDiscriminants` from `fidget_core`
+    - `reg_count` and `mem_count` are now counts (rather than "highest value")
 - Add `PartialEq` for `GeometryPixel`
 - Major refactoring of error types
     - `fidget::Error` is removed in favor of fine-grained error types
@@ -16,6 +33,33 @@
       code using `anyhow` (or similar) may not need to change
 - Fix a bug in bulk evaluator argument checks where mismatched slices could be
   allowed under some circumstances
+- Add `VmData::asm` to get an immutable reference to the inner `RegTape`
+- Add `RegTape::repack_map` and `RegTape::repack` to repack registers by
+  frequency (making register 0 the most frequently used, etc)
+- Add `RegOp::visit_regs` and `RegOp::visit_regs_mut` to visit registers in an
+  operation
+- Add `fidget-wgpu` crate, which does 3D rasterization with a `wgpu` backend
+    - This is even more experimental than the rest of Fidget!
+- Add `VarMap::iter` to iterate over `(var, index)` tuples
+- Simplified `Shape`, which was doing too much
+    - It no longer has its own transform matrix; bring your own to the
+      evaluation functions (with new `eval_with_transform` flavors)
+    - It no longer supports custom axes; it now always uses  `Var::{X, Y, Z}`
+    - Other tweaks to shape evaluation functions: `eval_v` is now
+      `eval_with_vars`, and there's a separate `eval_with_transform` (along with
+      `eval_with_transform_and_vars`).  These all return new error types too!
+- Add `output_count()` to `Function` trait
+- Add `ShapeVars::check` and `ShapeVars::contains_key` to check whether the
+  variable map is sufficient to evaluate a particular shape.
+- Change `fidget_raster` and `fidget_mesh` functions to take a `BoundShape<F>`,
+  which represents a shape and all of its associated variables.  A `BoundShape`
+  may be constructed using `TryFrom` for shapes with no variables other than X,
+  Y, Z; otherwise, `Shape::bind` must be used.  This removes a potential
+  `unwrap()` during rendering, because evaluation requires all variables to be
+  present.
+- Rename `trait ImageSizeLike` to `trait RenderSize` in `fidget_raster`; remove
+  `width` and `height` from `trait RenderConfig` and add a `RenderConfig:
+  RenderSize` bound
 
 # 0.4.3
 - Fixed bug in x86 interval `OR` function ([#395](https://github.com/mkeeter/fidget/pull/395)),
