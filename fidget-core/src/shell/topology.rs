@@ -228,27 +228,27 @@ impl ShellProfileSectionTopology {
             ),
             ShellProfileNodeTopology::new(
                 beam * 0.105,
-                keel_z + height * 0.070,
+                height.mul_add(0.070, keel_z),
                 ShellProfileNodeContinuity::Smooth,
             ),
             ShellProfileNodeTopology::new(
                 beam * 0.285,
-                keel_z + height * 0.185,
+                height.mul_add(0.185, keel_z),
                 ShellProfileNodeContinuity::Smooth,
             ),
             ShellProfileNodeTopology::new(
                 beam * 0.585,
-                keel_z + height * 0.390,
+                height.mul_add(0.390, keel_z),
                 ShellProfileNodeContinuity::Smooth,
             ),
             ShellProfileNodeTopology::new(
                 beam * 0.930,
-                keel_z + height * 0.615,
+                height.mul_add(0.615, keel_z),
                 ShellProfileNodeContinuity::Smooth,
             ),
             ShellProfileNodeTopology::new(
                 beam * 1.080,
-                keel_z + height * 0.805,
+                height.mul_add(0.805, keel_z),
                 ShellProfileNodeContinuity::Smooth,
             ),
             ShellProfileNodeTopology::new(
